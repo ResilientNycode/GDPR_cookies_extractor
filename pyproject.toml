@@ -1,0 +1,28 @@
+[project]
+name = "gdpr-cookies-extractor"
+version = "0.1.0"
+description = ""
+authors = [
+    {name = "Nicolò Moriconi",email = "n.moriconi02@gmail.com"}
+]
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "playwright (>=1.55.0,<2.0.0)",
+    "pandas (>=2.3.2,<3.0.0)",
+    "beautifulsoup4 (>=4.13.5,<5.0.0)"
+]
+
+[tool.poetry]
+packages = [{include = "gdpr_cookies_extractor", from = "src"}]
+
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.4.2"
+
+[build-system]
+requires = ["poetry-core>=2.0.0,<3.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry.scripts]
+main = "gdpr_cookies_extractor.extractor_playwright:main"

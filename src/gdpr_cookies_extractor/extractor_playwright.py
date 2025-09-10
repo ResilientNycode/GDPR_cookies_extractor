@@ -1,10 +1,12 @@
 import pandas as pd
 import json
 import asyncio
+import sys
 # Install Playwright: pip install playwright && playwright install
 from playwright.async_api import async_playwright
+from bs4 import BeautifulSoup
 # Assuming you have the LLM client set up
-from your_llm_library import YourLLMClient
+# from your_llm_library import YourLLMClient
 
 # Function to interact with the LLM API (remains the same)
 def call_llm_api(html_content, url):
@@ -17,10 +19,26 @@ def call_llm_api(html_content, url):
         "confidence_score": 0.95
     }
 
+def simple_extractor(html_page):
+    soup = BeautifulSoup(html_page, "html.parser")
+
+    privacy_links = []
+    for a in soup.find_all("a", href=True):
+        href = a["href"].lower()
+        text = a.get_text(strip=True).lower()
+        if "privacy" in href or "privacy" in text:
+            privacy_links.append(a["href"])
+
+    privacy_links = list(set(privacy_links))
+
+    print("Privacy related links:")
+    for link in privacy_links:
+        print(link)
+
 # Main async function to handle browser automation
-async def main_async():
+async def main_async(sites_df):
     # Load the CSV of sites
-    sites_df = pd.read_csv("sites.csv")
+    # sites_df = pd.read_csv("sites.csv")
     results = []
 
     async with async_playwright() as p:
@@ -47,27 +65,28 @@ async def main_async():
                 html_content = await page.content()
                 
                 # 3. Call the LLM to analyze the content
-                llm_output = call_llm_api(html_content, site_url)
+                simple_extractor(html_content)
+                # llm_output = call_llm_api(html_content, site_url)
                 
                 await page.close()
                 
                 # 4. Store the results (including cookies)
                 results.append({
                     "website_url": site_url,
-                    "privacy_policy_url": llm_output.get("privacy_policy_url"),
-                    "llm_found": llm_output.get("result_found"),
-                    "llm_reasoning": llm_output.get("reasoning"),
+                    # "privacy_policy_url": llm_output.get("privacy_policy_url"),
+                    # "llm_found": llm_output.get("result_found"),
+                    # "llm_reasoning": llm_output.get("reasoning"),
                     "cookies_count": len(cookies),
                     "raw_cookies_data": json.dumps(cookies) # Store cookies as a JSON string
                 })
 
             except Exception as e:
-                print(f"  ❌ Error processing {site_url}: {e}")
+                print(f"Error processing {site_url}: {e}")
                 results.append({
                     "website_url": site_url,
                     "privacy_policy_url": "N/A",
-                    "llm_found": False,
-                    "llm_reasoning": f"Failed to process: {e}",
+                    # "llm_found": False,
+                    # "llm_reasoning": f"Failed to process: {e}",
                     "cookies_count": 0,
                     "raw_cookies_data": "[]"
                 })
@@ -79,5 +98,23 @@ async def main_async():
     results_df.to_csv("analysis_results.csv", index=False)
     print("Analysis complete. Results saved to analysis_results.csv")
 
+
+def main():
+    print("Running via Poetry script...")
+
+    # Check if a URL was provided on the command line
+    if len(sys.argv) < 2:
+        print("Error: Please provide a URL as an argument.")
+        print("Usage: poetry run main <your_url>")
+        sys.exit(1) # Exit because the required argument is missing
+        
+    # The first argument is the URL (sys.argv[0] is the script name)
+    site_url_from_cli = sys.argv[1]
+    
+    # Create a DataFrame that matches the structure main_async expects
+    sites_df = pd.DataFrame([{'website_url': site_url_from_cli}])
+
+    asyncio.run(main_async(sites_df))
+
 if __name__ == "__main__":
-    asyncio.run(main_async())
+    main()
