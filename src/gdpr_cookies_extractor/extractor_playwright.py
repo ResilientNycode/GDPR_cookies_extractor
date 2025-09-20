@@ -2,22 +2,90 @@ import pandas as pd
 import json
 import asyncio
 import sys
-# Install Playwright: pip install playwright && playwright install
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
-# Assuming you have the LLM client set up
-# from your_llm_library import YourLLMClient
+import ollama
 
-# Function to interact with the LLM API (remains the same)
-def call_llm_api(html_content, url):
-    # ... (your existing LLM API call logic)
-    # Placeholder for a real LLM call
-    return {
-        "result_found": True,
-        "privacy_policy_url": f"{url}/privacy-policy-found-by-llm",
-        "reasoning": "The LLM found a link with 'privacy' in the footer.",
-        "confidence_score": 0.95
-    }
+OLLAMA_MODEL = 'llama3'
+
+async def call_llm_api(html_content: str, url: str) -> dict:
+    """
+    Sends HTML content to Ollama for privacy policy link extraction.
+    """
+    prompt = f"""
+    You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
+    This page is often linked from the footer, but can also be in a cookie banner, "About Us" section, or other legal notices.
+    Analyze the provided HTML content and find the most likely URL for the privacy policy.
+    Look for links containing keywords like 'privacy', 'policy', 'GDPR', 'data protection', 'cookie policy', or 'legal notice'.
+    The result must be returned as a JSON object.
+    The HTML content to analyze is below:
+    ---
+    {html_content}
+    ---
+    
+    The URL of the page is: {url}
+
+    Return your answer as a single JSON object with the following structure:
+    {{
+      "result_found": <boolean>,
+      "privacy_policy_url": <string>,
+      "reasoning": <string>,
+      "confidence_score": <number>
+    }}
+    If no URL is found, set "result_found" to false and "privacy_policy_url" to null.
+    """
+    
+    try:
+        # Use the ollama.chat function with the system and user messages
+        response = await ollama.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'You are a helpful assistant that provides JSON output.'
+                },
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            options={
+                'temperature': 0.0 # Use a low temperature for more deterministic, factual output
+            }
+        )
+
+        # Ollama's chat response is a dictionary. We extract the message content.
+        llm_response_content = response['message']['content']
+        
+        # The model might include some intro text, so we'll try to find the JSON
+        try:
+            # Find the JSON object within the text
+            start_index = llm_response_content.find('{')
+            end_index = llm_response_content.rfind('}') + 1
+            json_string = llm_response_content[start_index:end_index]
+            
+            # Parse the JSON string
+            llm_output = json.loads(json_string)
+            return llm_output
+        except (json.JSONDecodeError, ValueError) as e:
+            print(f"  ❌ Error decoding JSON from LLM response: {e}")
+            print(f"  Raw response from LLM: {llm_response_content}")
+            return {
+                "result_found": False,
+                "privacy_policy_url": None,
+                "reasoning": "LLM returned malformed JSON.",
+                "confidence_score": 0.0
+            }
+            
+    except Exception as e:
+        print(f"  ❌ An error occurred during the Ollama API call: {e}")
+        return {
+            "result_found": False,
+            "privacy_policy_url": None,
+            "reasoning": f"Ollama API call failed: {e}",
+            "confidence_score": 0.0
+        }
+
 
 def simple_extractor(html_page):
     soup = BeautifulSoup(html_page, "html.parser")
@@ -66,16 +134,16 @@ async def main_async(sites_df):
                 
                 # 3. Call the LLM to analyze the content
                 simple_extractor(html_content)
-                # llm_output = call_llm_api(html_content, site_url)
+                llm_output = await call_llm_api(html_content, site_url)
                 
                 await page.close()
                 
                 # 4. Store the results (including cookies)
                 results.append({
                     "website_url": site_url,
-                    # "privacy_policy_url": llm_output.get("privacy_policy_url"),
-                    # "llm_found": llm_output.get("result_found"),
-                    # "llm_reasoning": llm_output.get("reasoning"),
+                    "privacy_policy_url": llm_output.get("privacy_policy_url"),
+                    "llm_found": llm_output.get("result_found"),
+                    "llm_reasoning": llm_output.get("reasoning"),
                     "cookies_count": len(cookies),
                     "raw_cookies_data": json.dumps(cookies) # Store cookies as a JSON string
                 })
@@ -85,8 +153,8 @@ async def main_async(sites_df):
                 results.append({
                     "website_url": site_url,
                     "privacy_policy_url": "N/A",
-                    # "llm_found": False,
-                    # "llm_reasoning": f"Failed to process: {e}",
+                    "llm_found": False,
+                    "llm_reasoning": f"Failed to process: {e}",
                     "cookies_count": 0,
                     "raw_cookies_data": "[]"
                 })
