@@ -6,11 +6,13 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import ollama
 
+# Set the name of the LLM model you have pulled with Ollama
 OLLAMA_MODEL = 'llama3'
 
 async def call_llm_api(html_content: str, url: str) -> dict:
     """
-    Sends HTML content to Ollama for privacy policy link extraction.
+    Sends HTML content to Ollama to find the privacy policy URL.
+    Returns a structured dictionary with the result.
     """
     prompt = f"""
     You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
@@ -18,6 +20,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
     Analyze the provided HTML content and find the most likely URL for the privacy policy.
     Look for links containing keywords like 'privacy', 'policy', 'GDPR', 'data protection', 'cookie policy', or 'legal notice'.
     The result must be returned as a JSON object.
+    
     The HTML content to analyze is below:
     ---
     {html_content}
@@ -36,8 +39,9 @@ async def call_llm_api(html_content: str, url: str) -> dict:
     """
     
     try:
-        # Use the ollama.chat function with the system and user messages
-        response = await ollama.chat(
+        client = ollama.AsyncClient()
+
+        response = await client.chat(
             model=OLLAMA_MODEL,
             messages=[
                 {
@@ -50,24 +54,32 @@ async def call_llm_api(html_content: str, url: str) -> dict:
                 }
             ],
             options={
-                'temperature': 0.0 # Use a low temperature for more deterministic, factual output
+                'temperature': 0.0 # Low temperature for deterministic output
             }
         )
 
-        # Ollama's chat response is a dictionary. We extract the message content.
         llm_response_content = response['message']['content']
         
-        # The model might include some intro text, so we'll try to find the JSON
         try:
-            # Find the JSON object within the text
-            start_index = llm_response_content.find('{')
-            end_index = llm_response_content.rfind('}') + 1
-            json_string = llm_response_content[start_index:end_index]
+            # Check for Markdown code block and extract JSON string
+            start_marker = '```json'
+            end_marker = '```'
+            if start_marker in llm_response_content:
+                start_index = llm_response_content.find(start_marker) + len(start_marker)
+                end_index = llm_response_content.find(end_marker, start_index)
+                json_string = llm_response_content[start_index:end_index].strip()
+            else:
+                # Fallback to finding the first and last braces
+                start_index = llm_response_content.find('{')
+                end_index = llm_response_content.rfind('}') + 1
+                json_string = llm_response_content[start_index:end_index]
             
-            # Parse the JSON string
+            # If parsing is successful, return the data
             llm_output = json.loads(json_string)
             return llm_output
+            
         except (json.JSONDecodeError, ValueError) as e:
+            # Handle cases where the LLM's output is not valid JSON
             print(f"  ❌ Error decoding JSON from LLM response: {e}")
             print(f"  Raw response from LLM: {llm_response_content}")
             return {
@@ -78,6 +90,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
             }
             
     except Exception as e:
+        # Handle errors related to the Ollama API call itself
         print(f"  ❌ An error occurred during the Ollama API call: {e}")
         return {
             "result_found": False,
@@ -86,8 +99,11 @@ async def call_llm_api(html_content: str, url: str) -> dict:
             "confidence_score": 0.0
         }
 
-
 def simple_extractor(html_page):
+    """
+    A simple rule-based function to find privacy-related links using BeautifulSoup.
+    This serves as a good baseline for comparison with the LLM's performance.
+    """
     soup = BeautifulSoup(html_page, "html.parser")
 
     privacy_links = []
@@ -103,10 +119,12 @@ def simple_extractor(html_page):
     for link in privacy_links:
         print(link)
 
-# Main async function to handle browser automation
 async def main_async(sites_df):
-    # Load the CSV of sites
-    # sites_df = pd.read_csv("sites.csv")
+    """
+    The main asynchronous function that orchestrates the entire process.
+    It loops through sites, uses Playwright to get cookies and HTML, and
+    then sends the HTML to the LLM for analysis.
+    """
     results = []
 
     async with async_playwright() as p:
@@ -119,7 +137,7 @@ async def main_async(sites_df):
             try:
                 page = await browser.new_page()
                 
-                # 1. Navigate and get cookies
+                print("Fetching cookies and HTML...")
                 await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
                 
                 # Wait for potential cookie banners or scripts to run
@@ -127,25 +145,30 @@ async def main_async(sites_df):
 
                 # Get the cookies
                 cookies = await page.context.cookies()
-                print(f"  -> Captured {len(cookies)} cookies.")
+                print(f"Captured {len(cookies)} cookies.")
                 
-                # 2. Get the HTML content for the LLM
+                # Get the HTML content for the LLM
                 html_content = await page.content()
                 
-                # 3. Call the LLM to analyze the content
+                # Call the simple extractor to show its output
                 simple_extractor(html_content)
+                
+                print("  🧠 Sending HTML to LLM for analysis...")
                 llm_output = await call_llm_api(html_content, site_url)
+                print("LLM task complete. Processing response.")
+
+                print(llm_output)
                 
                 await page.close()
                 
-                # 4. Store the results (including cookies)
+                # Store the results (including cookies)
                 results.append({
                     "website_url": site_url,
                     "privacy_policy_url": llm_output.get("privacy_policy_url"),
                     "llm_found": llm_output.get("result_found"),
                     "llm_reasoning": llm_output.get("reasoning"),
                     "cookies_count": len(cookies),
-                    "raw_cookies_data": json.dumps(cookies) # Store cookies as a JSON string
+                    "raw_cookies_data": json.dumps(cookies)
                 })
 
             except Exception as e:
@@ -161,22 +184,23 @@ async def main_async(sites_df):
         
         await browser.close()
 
-    # 5. Save the final results to a new CSV
+    # Save the final results to a new CSV
     results_df = pd.DataFrame(results)
     results_df.to_csv("analysis_results.csv", index=False)
     print("Analysis complete. Results saved to analysis_results.csv")
 
-
 def main():
+    """
+    The synchronous entry point for the script.
+    It handles command-line arguments and starts the async main loop.
+    """
     print("Running via Poetry script...")
 
-    # Check if a URL was provided on the command line
     if len(sys.argv) < 2:
         print("Error: Please provide a URL as an argument.")
         print("Usage: poetry run main <your_url>")
-        sys.exit(1) # Exit because the required argument is missing
+        sys.exit(1)
         
-    # The first argument is the URL (sys.argv[0] is the script name)
     site_url_from_cli = sys.argv[1]
     
     # Create a DataFrame that matches the structure main_async expects
