@@ -35,7 +35,9 @@ async def call_llm_api(html_content: str, url: str) -> dict:
       "reasoning": <string>,
       "confidence_score": <number>
     }}
+    privacy_policy_url must be the full URL to the privacy page. 
     If no URL is found, set "result_found" to false and "privacy_policy_url" to null.
+    Just return the json object, no needs of introduction or other strings in the repsponse. 
     """
     
     try:
@@ -59,6 +61,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
         )
 
         llm_response_content = response['message']['content']
+        print(f"Raw response from LLM: {llm_response_content}")
         
         try:
             # Check for Markdown code block and extract JSON string
