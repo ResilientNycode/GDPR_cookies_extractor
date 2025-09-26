@@ -5,9 +5,13 @@ import sys
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import ollama
+import logging
 
 # Set the name of the LLM model you have pulled with Ollama
 OLLAMA_MODEL = 'llama3'
+
+# Create a logger instance
+logger = logging.getLogger(__name__)
 
 async def call_llm_api(html_content: str, url: str) -> dict:
     """
@@ -61,7 +65,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
         )
 
         llm_response_content = response['message']['content']
-        print(f"Raw response from LLM: {llm_response_content}")
+        logger.debug(f"Raw response from LLM: {llm_response_content}")
         
         try:
             start_marker = '```json'
@@ -79,8 +83,8 @@ async def call_llm_api(html_content: str, url: str) -> dict:
             return llm_output
             
         except (json.JSONDecodeError, ValueError) as e:
-            print(f"  ❌ Error decoding JSON from LLM response: {e}")
-            print(f"  Raw response from LLM: {llm_response_content}")
+            logger.error(f"Error decoding JSON from LLM response: {e}")
+            logger.debug(f"Raw response from LLM: {llm_response_content}")
             return {
                 "result_found": False,
                 "privacy_policy_url": None,
@@ -89,7 +93,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
             }
             
     except Exception as e:
-        print(f"  ❌ An error occurred during the Ollama API call: {e}")
+        logger.error(f"An error occurred during the Ollama API call: {e}")
         return {
             "result_found": False,
             "privacy_policy_url": None,
@@ -112,9 +116,9 @@ def simple_extractor(html_page):
 
     privacy_links = list(set(privacy_links))
 
-    print("Privacy related links:")
+    logger.info("Privacy related links:")
     for link in privacy_links:
-        print(link)
+        logger.info(link)
 
 async def main_async(sites_df):
     """
@@ -128,34 +132,31 @@ async def main_async(sites_df):
         for index, row in sites_df.iterrows():
             site_url = row['website_url']
 
-            # --- START OF FIX ---
-            # Check if the URL has a protocol and add one if it doesn't
             if not site_url.startswith('http://') and not site_url.startswith('https://'):
                 site_url = 'https://' + site_url
-            # --- END OF FIX ---
 
-            print(f"Processing: {site_url}")
+            logger.info(f"Processing: {site_url}")
             
             try:
                 page = await browser.new_page()
                 
-                print("Fetching cookies and HTML...")
+                logger.info("Fetching cookies and HTML...")
                 await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
                 
                 await page.wait_for_timeout(3000) 
 
                 cookies = await page.context.cookies()
-                print(f"Captured {len(cookies)} cookies.")
+                logger.info(f"Captured {len(cookies)} cookies.")
                 
                 html_content = await page.content()
                 
                 simple_extractor(html_content)
                 
-                print("  🧠 Sending HTML to LLM for analysis...")
+                logger.info("  🧠 Sending HTML to LLM for analysis...")
                 llm_output = await call_llm_api(html_content, site_url)
-                print("LLM task complete. Processing response.")
+                logger.info("LLM task complete. Processing response.")
 
-                print(llm_output)
+                logger.info(llm_output)
                 
                 await page.close()
                 
@@ -169,7 +170,7 @@ async def main_async(sites_df):
                 })
 
             except Exception as e:
-                print(f"Error processing {site_url}: {e}")
+                logger.error(f"Error processing {site_url}: {e}")
                 results.append({
                     "website_url": site_url,
                     "privacy_policy_url": "N/A",
@@ -183,31 +184,38 @@ async def main_async(sites_df):
 
     results_df = pd.DataFrame(results)
     results_df.to_csv("analysis_results.csv", index=False)
-    print("Analysis complete. Results saved to analysis_results.csv")
+    logger.info("Analysis complete. Results saved to analysis_results.csv")
 
 def main():
     """
     The synchronous entry point for the script.
     It now handles either a command-line URL or a CSV file.
     """
-    print("Running via Poetry script...")
+    # Configure the logger
+    logging.basicConfig(
+        level=logging.INFO, # Set the default logging level
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler("gdpr_analysis.log"), # Log to a file
+            logging.StreamHandler(sys.stdout) # Log to the console
+        ]
+    )
+    
+    logger.info("Running via Poetry script...")
 
     if len(sys.argv) > 1:
-        # A URL was provided as a command-line argument
         site_url_from_cli = sys.argv[1]
         sites_df = pd.DataFrame([{'website_url': site_url_from_cli}])
     else:
-        # No URL was provided, read from the CSV file
         try:
             sites_df = pd.read_csv("sites.csv", header=None, names=['index_col', 'website_url'])
-            # sites_df = pd.read_csv("sites.csv")
             sites_df = sites_df.drop(columns=['index_col'])
             if 'website_url' not in sites_df.columns:
-                print("Error: The CSV file must contain a 'website_url' column.")
+                logger.error("The CSV file must contain a 'website_url' column.")
                 sys.exit(1)
         except FileNotFoundError:
-            print("Error: No URL provided and 'sites.csv' file not found.")
-            print("Usage: poetry run main <your_url> or place a 'sites.csv' file in the directory.")
+            logger.error("No URL provided and 'sites.csv' file not found.")
+            logger.error("Usage: poetry run main <your_url> or place a 'sites.csv' file in the directory.")
             sys.exit(1)
 
     asyncio.run(main_async(sites_df))
