@@ -6,6 +6,7 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 import ollama
 import logging
+from datetime import datetime
 
 # Set the name of the LLM model you have pulled with Ollama
 OLLAMA_MODEL = 'llama3'
@@ -183,7 +184,9 @@ async def main_async(sites_df):
         await browser.close()
 
     results_df = pd.DataFrame(results)
-    results_df.to_csv("analysis_results.csv", index=False)
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    filename = f"analysis_results_{timestamp}.csv"
+    results_df.to_csv(filename, index=False)
     logger.info("Analysis complete. Results saved to analysis_results.csv")
 
 def main():
