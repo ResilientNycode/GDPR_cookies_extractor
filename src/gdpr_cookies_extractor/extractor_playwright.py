@@ -56,7 +56,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
                 }
             ],
             options={
-                'temperature': 0.0 # Low temperature for deterministic output
+                'temperature': 0.0
             }
         )
 
@@ -64,7 +64,6 @@ async def call_llm_api(html_content: str, url: str) -> dict:
         print(f"Raw response from LLM: {llm_response_content}")
         
         try:
-            # Check for Markdown code block and extract JSON string
             start_marker = '```json'
             end_marker = '```'
             if start_marker in llm_response_content:
@@ -72,17 +71,14 @@ async def call_llm_api(html_content: str, url: str) -> dict:
                 end_index = llm_response_content.find(end_marker, start_index)
                 json_string = llm_response_content[start_index:end_index].strip()
             else:
-                # Fallback to finding the first and last braces
                 start_index = llm_response_content.find('{')
                 end_index = llm_response_content.rfind('}') + 1
                 json_string = llm_response_content[start_index:end_index]
             
-            # If parsing is successful, return the data
             llm_output = json.loads(json_string)
             return llm_output
             
         except (json.JSONDecodeError, ValueError) as e:
-            # Handle cases where the LLM's output is not valid JSON
             print(f"  ❌ Error decoding JSON from LLM response: {e}")
             print(f"  Raw response from LLM: {llm_response_content}")
             return {
@@ -93,7 +89,6 @@ async def call_llm_api(html_content: str, url: str) -> dict:
             }
             
     except Exception as e:
-        # Handle errors related to the Ollama API call itself
         print(f"  ❌ An error occurred during the Ollama API call: {e}")
         return {
             "result_found": False,
@@ -105,7 +100,6 @@ async def call_llm_api(html_content: str, url: str) -> dict:
 def simple_extractor(html_page):
     """
     A simple rule-based function to find privacy-related links using BeautifulSoup.
-    This serves as a good baseline for comparison with the LLM's performance.
     """
     soup = BeautifulSoup(html_page, "html.parser")
 
@@ -125,8 +119,6 @@ def simple_extractor(html_page):
 async def main_async(sites_df):
     """
     The main asynchronous function that orchestrates the entire process.
-    It loops through sites, uses Playwright to get cookies and HTML, and
-    then sends the HTML to the LLM for analysis.
     """
     results = []
 
@@ -135,6 +127,13 @@ async def main_async(sites_df):
         
         for index, row in sites_df.iterrows():
             site_url = row['website_url']
+
+            # --- START OF FIX ---
+            # Check if the URL has a protocol and add one if it doesn't
+            if not site_url.startswith('http://') and not site_url.startswith('https://'):
+                site_url = 'https://' + site_url
+            # --- END OF FIX ---
+
             print(f"Processing: {site_url}")
             
             try:
@@ -143,17 +142,13 @@ async def main_async(sites_df):
                 print("Fetching cookies and HTML...")
                 await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
                 
-                # Wait for potential cookie banners or scripts to run
                 await page.wait_for_timeout(3000) 
 
-                # Get the cookies
                 cookies = await page.context.cookies()
                 print(f"Captured {len(cookies)} cookies.")
                 
-                # Get the HTML content for the LLM
                 html_content = await page.content()
                 
-                # Call the simple extractor to show its output
                 simple_extractor(html_content)
                 
                 print("  🧠 Sending HTML to LLM for analysis...")
@@ -164,7 +159,6 @@ async def main_async(sites_df):
                 
                 await page.close()
                 
-                # Store the results (including cookies)
                 results.append({
                     "website_url": site_url,
                     "privacy_policy_url": llm_output.get("privacy_policy_url"),
@@ -187,7 +181,6 @@ async def main_async(sites_df):
         
         await browser.close()
 
-    # Save the final results to a new CSV
     results_df = pd.DataFrame(results)
     results_df.to_csv("analysis_results.csv", index=False)
     print("Analysis complete. Results saved to analysis_results.csv")
@@ -195,19 +188,27 @@ async def main_async(sites_df):
 def main():
     """
     The synchronous entry point for the script.
-    It handles command-line arguments and starts the async main loop.
+    It now handles either a command-line URL or a CSV file.
     """
     print("Running via Poetry script...")
 
-    if len(sys.argv) < 2:
-        print("Error: Please provide a URL as an argument.")
-        print("Usage: poetry run main <your_url>")
-        sys.exit(1)
-        
-    site_url_from_cli = sys.argv[1]
-    
-    # Create a DataFrame that matches the structure main_async expects
-    sites_df = pd.DataFrame([{'website_url': site_url_from_cli}])
+    if len(sys.argv) > 1:
+        # A URL was provided as a command-line argument
+        site_url_from_cli = sys.argv[1]
+        sites_df = pd.DataFrame([{'website_url': site_url_from_cli}])
+    else:
+        # No URL was provided, read from the CSV file
+        try:
+            sites_df = pd.read_csv("sites.csv", header=None, names=['index_col', 'website_url'])
+            # sites_df = pd.read_csv("sites.csv")
+            sites_df = sites_df.drop(columns=['index_col'])
+            if 'website_url' not in sites_df.columns:
+                print("Error: The CSV file must contain a 'website_url' column.")
+                sys.exit(1)
+        except FileNotFoundError:
+            print("Error: No URL provided and 'sites.csv' file not found.")
+            print("Usage: poetry run main <your_url> or place a 'sites.csv' file in the directory.")
+            sys.exit(1)
 
     asyncio.run(main_async(sites_df))
 
