@@ -40,7 +40,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
       "reasoning": <string>,
       "confidence_score": <number>
     }}
-    privacy_policy_url must be the full URL to the privacy page. 
+    Privacy_policy_url must be the full URL to the privacy page. 
     If no URL is found, set "result_found" to false and "privacy_policy_url" to null.
     Just return the json object, no needs of introduction or other strings in the repsponse. 
     """
@@ -69,6 +69,7 @@ async def call_llm_api(html_content: str, url: str) -> dict:
         logger.debug(f"Raw response from LLM: {llm_response_content}")
         
         try:
+            ### this part can be cleaner => do some test modfifing the system role or the promt. 
             start_marker = '```json'
             end_marker = '```'
             if start_marker in llm_response_content:
@@ -103,9 +104,6 @@ async def call_llm_api(html_content: str, url: str) -> dict:
         }
 
 def simple_extractor(html_page):
-    """
-    A simple rule-based function to find privacy-related links using BeautifulSoup.
-    """
     soup = BeautifulSoup(html_page, "html.parser")
 
     privacy_links = []
@@ -122,9 +120,6 @@ def simple_extractor(html_page):
         logger.info(link)
 
 async def main_async(sites_df):
-    """
-    The main asynchronous function that orchestrates the entire process.
-    """
     results = []
 
     async with async_playwright() as p:
@@ -153,7 +148,7 @@ async def main_async(sites_df):
                 
                 simple_extractor(html_content)
                 
-                logger.info("  🧠 Sending HTML to LLM for analysis...")
+                logger.info("Sending HTML to LLM for analysis...")
                 llm_output = await call_llm_api(html_content, site_url)
                 logger.info("LLM task complete. Processing response.")
 
@@ -190,20 +185,17 @@ async def main_async(sites_df):
     logger.info("Analysis complete. Results saved to analysis_results.csv")
 
 def main():
-    """
-    The synchronous entry point for the script.
-    It now handles either a command-line URL or a CSV file.
-    """
-    # Configure the logger
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    log_filename = f"gdpr_analysis_{timestamp}.log"
+
     logging.basicConfig(
-        level=logging.INFO, # Set the default logging level
+        level=logging.DEBUG,
         format='%(asctime)s - %(levelname)s - %(message)s',
         handlers=[
-            logging.FileHandler("gdpr_analysis.log"), # Log to a file
-            logging.StreamHandler(sys.stdout) # Log to the console
+            logging.FileHandler(log_filename),
+            logging.StreamHandler(sys.stdout) 
         ]
     )
-    
     logger.info("Running via Poetry script...")
 
     if len(sys.argv) > 1:

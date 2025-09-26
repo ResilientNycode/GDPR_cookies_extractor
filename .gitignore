@@ -207,3 +207,4 @@ marimo/_lsp/
 __marimo__/
 analysis_results.csv
 poetry.lock
+.~lock.analysis_results.csv#
