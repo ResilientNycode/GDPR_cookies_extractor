@@ -8,17 +8,11 @@ import ollama
 import logging
 from datetime import datetime
 
-# Set the name of the LLM model you have pulled with Ollama
 OLLAMA_MODEL = 'llama3'
 
-# Create a logger instance
 logger = logging.getLogger(__name__)
 
-async def call_llm_api(html_content: str, url: str) -> dict:
-    """
-    Sends HTML content to Ollama to find the privacy policy URL.
-    Returns a structured dictionary with the result.
-    """
+async def call_llm_api(html_content, url):
     prompt = f"""
     You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
     This page is often linked from the footer, but can also be in a cookie banner, "About Us" section, or other legal notices.
