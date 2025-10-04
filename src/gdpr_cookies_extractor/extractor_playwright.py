@@ -12,7 +12,52 @@ OLLAMA_MODEL = 'llama3'
 
 logger = logging.getLogger(__name__)
 
+async def handle_cookie_banner(page, action="accept"):
+    """
+    Finds and clicks the cookie banner button based on the desired action.
+    """
+    # Define common selectors for "accept" and "reject" buttons.
+    # Note: These are common examples, and you might need to add more
+    # for different websites in your thesis.
+    accept_selectors = [
+        "text=Accept",
+        "text=Accept All",
+        "text=OK",
+        "role=button[name='Accept']",
+        "role=button[name='Accept All']",
+        "role=button[name='OK']"
+    ]
+    reject_selectors = [
+        "text=Reject",
+        "text=Reject All",
+        "text=Deny",
+        "role=button[name='Reject']",
+        "role=button[name='Reject All']",
+        "role=button[name='Deny']"
+    ]
+
+    target_selectors = accept_selectors if action == "accept" else reject_selectors
+
+    for selector in target_selectors:
+        try:
+            button = page.locator(selector)
+            
+            if await button.is_visible(timeout=5000):
+                logger.info(f"Clicking '{action}' button with selector: {selector}")
+                await button.click()
+                await page.wait_for_timeout(2000) 
+                return True
+        except Exception:
+            continue
+    
+    logger.info(f"No '{action}' button found for this site.")
+    return False
+
 async def call_llm_api(html_content, url):
+    """
+    Sends HTML content to Ollama to find the privacy policy URL.
+    Returns a structured dictionary with the result.
+    """
     prompt = f"""
     You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
     This page is often linked from the footer, but can also be in a cookie banner, "About Us" section, or other legal notices.
@@ -125,51 +170,54 @@ async def main_async(sites_df):
             if not site_url.startswith('http://') and not site_url.startswith('https://'):
                 site_url = 'https://' + site_url
 
-            logger.info(f"Processing: {site_url}")
+            scenarios = ["accept", "reject"]
+            for scenario in scenarios:
+                logger.info(f"Processing: {site_url} with scenario: {scenario}")
+                
+                try:
+                    page = await browser.new_page()
+                    
+                    logger.info("Fetching cookies and HTML...")
+                    await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
+                    
+                    await handle_cookie_banner(page, action=scenario)
+
+                    await page.wait_for_timeout(3000)
+                    cookies = await page.context.cookies()
+                    logger.info(f"Captured {len(cookies)} cookies after '{scenario}' action.")
+                    
+                    html_content = await page.content()
+                    simple_extractor(html_content)
+                    
+                    logger.info(" Sending HTML to LLM for analysis...")
+                    llm_output = await call_llm_api(html_content, site_url)
+                    logger.info("LLM task complete. Processing response.")
+                    logger.info(llm_output)
+                    
+                    await page.close()
+                    
+                    results.append({
+                        "website_url": site_url,
+                        "scenario": scenario, # Add the scenario to the result
+                        "privacy_policy_url": llm_output.get("privacy_policy_url"),
+                        "llm_found": llm_output.get("result_found"),
+                        "llm_reasoning": llm_output.get("reasoning"),
+                        "cookies_count": len(cookies),
+                        "raw_cookies_data": json.dumps(cookies)
+                    })
+
+                except Exception as e:
+                    logger.error(f"Error processing {site_url} in '{scenario}' scenario: {e}")
+                    results.append({
+                        "website_url": site_url,
+                        "scenario": scenario,
+                        "privacy_policy_url": "N/A",
+                        "llm_found": False,
+                        "llm_reasoning": f"Failed to process: {e}",
+                        "cookies_count": 0,
+                        "raw_cookies_data": "[]"
+                    })
             
-            try:
-                page = await browser.new_page()
-                
-                logger.info("Fetching cookies and HTML...")
-                await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
-                
-                await page.wait_for_timeout(3000) 
-
-                cookies = await page.context.cookies()
-                logger.info(f"Captured {len(cookies)} cookies.")
-                
-                html_content = await page.content()
-                
-                simple_extractor(html_content)
-                
-                logger.info("Sending HTML to LLM for analysis...")
-                llm_output = await call_llm_api(html_content, site_url)
-                logger.info("LLM task complete. Processing response.")
-
-                logger.info(llm_output)
-                
-                await page.close()
-                
-                results.append({
-                    "website_url": site_url,
-                    "privacy_policy_url": llm_output.get("privacy_policy_url"),
-                    "llm_found": llm_output.get("result_found"),
-                    "llm_reasoning": llm_output.get("reasoning"),
-                    "cookies_count": len(cookies),
-                    "raw_cookies_data": json.dumps(cookies)
-                })
-
-            except Exception as e:
-                logger.error(f"Error processing {site_url}: {e}")
-                results.append({
-                    "website_url": site_url,
-                    "privacy_policy_url": "N/A",
-                    "llm_found": False,
-                    "llm_reasoning": f"Failed to process: {e}",
-                    "cookies_count": 0,
-                    "raw_cookies_data": "[]"
-                })
-        
         await browser.close()
 
     results_df = pd.DataFrame(results)
