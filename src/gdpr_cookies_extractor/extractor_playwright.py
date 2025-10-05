@@ -53,7 +53,73 @@ async def handle_cookie_banner(page, action="accept"):
     logger.info(f"No '{action}' button found for this site.")
     return False
 
-async def call_llm_api(html_content, url):
+sync def categorize_cookies_with_llm(cookies_data):
+    """
+    Categorizes a list of cookies using the LLM.
+    Returns a dictionary of categorized cookies.
+    """
+    # Create the user prompt with the cookies to categorize
+    cookies_json_list = json.dumps(cookies_data, indent=2)
+    prompt = f"""
+    You are an expert in GDPR cookie compliance. Your task is to categorize a list of cookies based on their name and properties.
+    Categorize each cookie into one of the following types:
+    - "Strictly Necessary": Essential for the website's basic function (e.g., sessions, shopping cart).
+    - "Functional": Remembers user choices (e.g., language, preferences).
+    - "Analytical": Collects data on user behavior to improve the site (e.g., Google Analytics).
+    - "Marketing": Tracks users for advertising and personalization.
+    - "Uncategorized": No clear purpose can be determined.
+    
+    Return a JSON object with the website's cookies categorized into these types.
+
+    Cookies to categorize:
+    {cookies_json_list}
+    """
+    
+    try:
+        client = ollama.AsyncClient()
+        response = await client.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'You are a helpful assistant that provides JSON output.'
+                },
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            options={
+                'temperature': 0.0
+            }
+        )
+        
+        llm_response_content = response['message']['content']
+        logger.debug(f"Raw cookie categorization response from LLM: {llm_response_content}")
+
+        # The same robust JSON parsing logic applies here
+        start_marker = '```json'
+        end_marker = '```'
+        if start_marker in llm_response_content:
+            start_index = llm_response_content.find(start_marker) + len(start_marker)
+            end_index = llm_response_content.find(end_marker, start_index)
+            json_string = llm_response_content[start_index:end_index].strip()
+        else:
+            start_index = llm_response_content.find('{')
+            end_index = llm_response_content.rfind('}') + 1
+            json_string = llm_response_content[start_index:end_index]
+        
+        return json.loads(json_string)
+
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Error decoding JSON for cookie categorization: {e}")
+        logger.debug(f"Raw response: {llm_response_content}")
+        return {} # Return an empty dictionary on failure
+    except Exception as e:
+        logger.error(f"An error occurred during cookie categorization: {e}")
+        return {} 
+
+async def call_llm_api(html_content: str, url: str) -> dict:
     """
     Sends HTML content to Ollama to find the privacy policy URL.
     Returns a structured dictionary with the result.
@@ -185,6 +251,12 @@ async def main_async(sites_df):
                     await page.wait_for_timeout(3000)
                     cookies = await page.context.cookies()
                     logger.info(f"Captured {len(cookies)} cookies after '{scenario}' action.")
+
+                    # Call the new function to categorize the cookies
+                    logger.info("Sending cookies to LLM for categorization...")
+                    cookie_categories = await categorize_cookies_with_llm(cookies)
+                    logger.info("Cookie categorization complete.")
+                    logger.info(f"Categorized Cookies: {cookie_categories}")
                     
                     html_content = await page.content()
                     simple_extractor(html_content)
@@ -203,7 +275,8 @@ async def main_async(sites_df):
                         "llm_found": llm_output.get("result_found"),
                         "llm_reasoning": llm_output.get("reasoning"),
                         "cookies_count": len(cookies),
-                        "raw_cookies_data": json.dumps(cookies)
+                        "raw_cookies_data": json.dumps(cookies),
+                        "categorized_cookies": json.dumps(cookie_categories)
                     })
 
                 except Exception as e:
