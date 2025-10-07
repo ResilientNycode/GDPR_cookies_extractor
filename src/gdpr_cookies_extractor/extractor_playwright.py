@@ -53,7 +53,7 @@ async def handle_cookie_banner(page, action="accept"):
     logger.info(f"No '{action}' button found for this site.")
     return False
 
-sync def categorize_cookies_with_llm(cookies_data):
+async def categorize_cookies_with_llm(cookies_data):
     """
     Categorizes a list of cookies using the LLM.
     Returns a dictionary of categorized cookies.
