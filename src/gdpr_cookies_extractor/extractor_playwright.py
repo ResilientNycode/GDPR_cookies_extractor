@@ -7,10 +7,89 @@ from bs4 import BeautifulSoup
 import ollama
 import logging
 from datetime import datetime
+from urllib.parse import urlparse, urljoin
 
 OLLAMA_MODEL = 'llama3'
 
 logger = logging.getLogger(__name__)
+
+async def find_dpo_with_llm(privacy_policy_html: str, url: str) -> dict:
+    """
+    Analyzes the HTML of a privacy policy page to find DPO contact information.
+    If not found, it looks for sub-links to follow.
+    """
+    # Prompt for DPO extraction on the current page
+    dpo_prompt = f""""
+    You are an expert in GDPR compliance. Your task is to find the contact details of the Data Protection Officer (DPO) or the main contact point for privacy information in the provided privacy policy.
+    Look for keywords like "Data Protection Officer", "DPO", "contact us for privacy", or similar phrases.
+    Extract the contact information, specifically an email address and a postal address, if available.
+    
+    If you find the DPO information, return a JSON object with "dpo_found": true and the contact details in their specific keys.
+    If you do NOT find the DPO information, look for any links in the HTML that could lead to DPO information. These links might contain text like "Privacy Governance," "Contact Apple Legal," "Privacy Inquiries," or "Contact us".
+    If you find such a link, return a JSON object with "dpo_found": false, and the URL of the sub-link in the "sub_link" key.
+    
+    Privacy Policy HTML content:
+    ---
+    {privacy_policy_html}
+    ---
+    
+    The URL of the page is: {url}
+
+    Return your answer as a single JSON object with the following structure:
+    {{
+      "dpo_found": <boolean>,
+      "email_address": <string>,
+      "postal_address": <string>,
+      "sub_link": <string>,
+      "reasoning": <string>
+    }}
+    If no DPO or relevant sub-link is found, set "dpo_found" to false, "email_address" to null, "postal_address" to null, and "sub_link" to null.
+    Just return the json object, no needs of introduction or other strings in the repsponse.
+    """
+    
+    try:
+        client = ollama.AsyncClient()
+        response = await client.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'You are a helpful assistant that provides JSON output.'
+                },
+                {
+                    'role': 'user',
+                    'content': dpo_prompt
+                }
+            ],
+            options={
+                'temperature': 0.0
+            }
+        )
+
+        llm_response_content = response['message']['content']
+        logger.debug(f"Raw DPO response from LLM: {llm_response_content}")
+        
+        # Use the same robust JSON parsing logic
+        start_marker = '```json'
+        end_marker = '```'
+        if start_marker in llm_response_content:
+            start_index = llm_response_content.find(start_marker) + len(start_marker)
+            end_index = llm_response_content.find(end_marker, start_index)
+            json_string = llm_response_content[start_index:end_index].strip()
+        else:
+            start_index = llm_response_content.find('{')
+            end_index = llm_response_content.rfind('}') + 1
+            json_string = llm_response_content[start_index:end_index]
+        
+        return json.loads(json_string)
+
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Error decoding JSON for DPO extraction: {e}")
+        logger.debug(f"Raw response: {llm_response_content}")
+        return {"dpo_found": False, "contact_info": None, "sub_link": None, "reasoning": "LLM returned malformed JSON."}
+    except Exception as e:
+        logger.error(f"An error occurred during DPO extraction: {e}")
+        return {"dpo_found": False, "contact_info": None, "sub_link": None, "reasoning": "Ollama API call failed."}
 
 async def handle_cookie_banner(page, action="accept"):
     """
@@ -257,6 +336,22 @@ async def main_async(sites_df):
                     cookie_categories = await categorize_cookies_with_llm(cookies)
                     logger.info("Cookie categorization complete.")
                     logger.info(f"Categorized Cookies: {cookie_categories}")
+
+                    
+                    base_domain = urlparse(site_url).netloc
+                    if base_domain.startswith('www.'):
+                        base_domain = base_domain[4:]
+
+                    third_party_count = 0
+                    for cookie in cookies:
+                        cookie_domain = cookie['domain']
+                        if cookie_domain.startswith('.'):
+                            cookie_domain = cookie_domain[1:]
+                        
+                        if cookie_domain != base_domain:
+                            third_party_count += 1
+                
+                    logger.info(f"Detected {third_party_count} third-party cookies.")
                     
                     html_content = await page.content()
                     simple_extractor(html_content)
@@ -267,6 +362,28 @@ async def main_async(sites_df):
                     logger.info(llm_output)
                     
                     await page.close()
+
+                    dpo_output = {"dpo_found": False, "contact_info": None, "reasoning": "No privacy policy URL found."}
+                    if llm_output.get("result_found"):
+                        privacy_policy_url = llm_output.get("privacy_policy_url")
+                        
+                        full_privacy_policy_url = urljoin(site_url, privacy_policy_url)
+                        logger.info(f"  Navigating to privacy policy page: {full_privacy_policy_url}")
+                        
+                        try:
+                            dpo_page = await browser.new_page()
+                            await dpo_page.goto(full_privacy_policy_url, timeout=60000)
+                            privacy_policy_html = await dpo_page.content()
+                            await dpo_page.close()
+                            
+                            logger.info("Analyzing privacy policy page for DPO information...")
+                            dpo_output = await find_dpo_with_llm(privacy_policy_html, full_privacy_policy_url)
+                            logger.info("DPO analysis complete.")
+                            logger.info(dpo_output)
+                            
+                        except Exception as e:
+                            logger.error(f"Error processing privacy policy page for DPO: {e}")
+                            dpo_output = {"dpo_found": False, "contact_info": None, "reasoning": f"Failed to navigate to privacy policy page: {e}"}
                     
                     results.append({
                         "website_url": site_url,
@@ -275,6 +392,7 @@ async def main_async(sites_df):
                         "llm_found": llm_output.get("result_found"),
                         "llm_reasoning": llm_output.get("reasoning"),
                         "cookies_count": len(cookies),
+                        "third_party_cookies_count": third_party_count,
                         "raw_cookies_data": json.dumps(cookies),
                         "categorized_cookies": json.dumps(cookie_categories)
                     })
@@ -288,7 +406,9 @@ async def main_async(sites_df):
                         "llm_found": False,
                         "llm_reasoning": f"Failed to process: {e}",
                         "cookies_count": 0,
-                        "raw_cookies_data": "[]"
+                        "third_party_cookies_count": 0,
+                        "raw_cookies_data": "[]",
+                        "categorized_cookies": "[]"
                     })
             
         await browser.close()
