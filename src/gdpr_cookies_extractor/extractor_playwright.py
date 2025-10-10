@@ -13,6 +13,74 @@ OLLAMA_MODEL = 'llama3'
 
 logger = logging.getLogger(__name__)
 
+async def analyze_retention_policy(privacy_policy_html: str) -> dict:
+    """
+    Analyzes the HTML of a privacy policy page to find data retention information.
+    """
+    prompt = f"""
+    You are an expert in GDPR compliance. Your task is to find and summarize the data retention policy in the provided privacy policy HTML.
+    Look for keywords and phrases related to data retention, such as "data retention", "how long we keep your data", "storage period", or "period for which data is stored".
+    Extract and summarize the key information about how long personal data is kept and any conditions for its retention.
+    
+    If you find the data retention policy, return a JSON object with "retention_found": true and a summary of the policy.
+    If you do NOT find a clear retention policy, return a JSON object with "retention_found": false.
+    
+    Privacy Policy HTML content:
+    ---
+    {privacy_policy_html}
+    ---
+    
+    Return your answer as a single JSON object with the following structure:
+    {{
+      "retention_found": <boolean>,
+      "retention_policy_summary": <string>,
+      "reasoning": <string>
+    }}
+    If no retention policy is found, set "retention_found" to false and "retention_policy_summary" to null.
+    Just return the json object, no needs of introduction or other strings in the repsponse.
+    """
+    
+    try:
+        client = ollama.AsyncClient()
+        response = await client.chat(
+            model=OLLAMA_MODEL,
+            messages=[
+                {
+                    'role': 'system',
+                    'content': 'You are a helpful assistant that provides JSON output.'
+                },
+                {
+                    'role': 'user',
+                    'content': prompt
+                }
+            ],
+            options={
+                'temperature': 0.0
+            }
+        )
+
+        llm_response_content = response['message']['content']
+        
+        start_marker = '```json'
+        end_marker = '```'
+        if start_marker in llm_response_content:
+            start_index = llm_response_content.find(start_marker) + len(start_marker)
+            end_index = llm_response_content.find(end_marker, start_index)
+            json_string = llm_response_content[start_index:end_index].strip()
+        else:
+            start_index = llm_response_content.find('{')
+            end_index = llm_response_content.rfind('}') + 1
+            json_string = llm_response_content[start_index:end_index]
+        
+        return json.loads(json_string)
+
+    except (json.JSONDecodeError, ValueError) as e:
+        logger.error(f"Error decoding JSON for retention analysis: {e}")
+        return {"retention_found": False, "retention_policy_summary": None, "reasoning": "LLM returned malformed JSON."}
+    except Exception as e:
+        logger.error(f"An error occurred during retention analysis: {e}")
+        return {"retention_found": False, "retention_policy_summary": None, "reasoning": "Ollama API call failed."}
+
 async def find_dpo_with_llm(privacy_policy_html: str, url: str) -> dict:
     """
     Analyzes the HTML of a privacy policy page to find DPO contact information.
@@ -364,6 +432,9 @@ async def main_async(sites_df):
                     await page.close()
 
                     dpo_output = {"dpo_found": False, "contact_info": None, "reasoning": "No privacy policy URL found."}
+                    retention_output = {"retention_found": False, "retention_policy_summary": None, "reasoning": "No privacy policy URL found."}
+
+
                     if llm_output.get("result_found"):
                         privacy_policy_url = llm_output.get("privacy_policy_url")
                         
@@ -375,6 +446,11 @@ async def main_async(sites_df):
                             await dpo_page.goto(full_privacy_policy_url, timeout=60000)
                             privacy_policy_html = await dpo_page.content()
                             await dpo_page.close()
+
+                            logger.info("Analyzing privacy policy page for data retention...")
+                            retention_output = await analyze_retention_policy(privacy_policy_html)
+                            logger.info("Data retention analysis complete.")
+                            logger.info(retention_output)
                             
                             logger.info("Analyzing privacy policy page for DPO information...")
                             dpo_output = await find_dpo_with_llm(privacy_policy_html, full_privacy_policy_url)
