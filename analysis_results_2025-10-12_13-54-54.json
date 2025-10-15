@@ -1,0 +1,29 @@
+{
+  "website_url": { "0": "https://apple.com", "1": "https://apple.com" },
+  "scenario": { "0": "accept", "1": "reject" },
+  "privacy_policy_url": { "0": null, "1": null },
+  "llm_found": { "0": false, "1": false },
+  "llm_reasoning": {
+    "0": "Ollama API call failed: model requires more system memory (5.4 GiB) than is available (3.6 GiB) (status code: 500)",
+    "1": "Ollama API call failed: model requires more system memory (5.4 GiB) than is available (3.6 GiB) (status code: 500)"
+  },
+  "dpo_contact_info": { "0": null, "1": null },
+  "dpo_found": { "0": false, "1": false },
+  "dpo_reasoning": {
+    "0": "No privacy policy URL found.",
+    "1": "No privacy policy URL found."
+  },
+  "retention_policy_summary": { "0": null, "1": null },
+  "retention_found": { "0": false, "1": false },
+  "retention_reasoning": {
+    "0": "No privacy policy URL found.",
+    "1": "No privacy policy URL found."
+  },
+  "cookies_count": { "0": 5, "1": 5 },
+  "third_party_cookies_count": { "0": 0, "1": 0 },
+  "raw_cookies_data": {
+    "0": "[{\"name\": \"geo\", \"value\": \"IT\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": -1, \"httpOnly\": false, \"secure\": false, \"sameSite\": \"Lax\"}, {\"name\": \"s_fid\", \"value\": \"4282C188E03A8ABE-262DDBC42B56B51B\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": 1760271885, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"Lax\"}, {\"name\": \"s_cc\", \"value\": \"true\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": -1, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"Lax\"}, {\"name\": \"mk_epub\", \"value\": \"%7B%22btuid%22%3A%226e9dyv%22%2C%22prop57%22%3A%22www.us.homepage%22%7D\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": -1, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"Lax\"}, {\"name\": \"s_vi\", \"value\": \"[CS]v1|3475CB832F728F17-40001180028EA086[CE]\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": 1760271885.433341, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"None\"}]",
+    "1": "[{\"name\": \"geo\", \"value\": \"IT\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": -1, \"httpOnly\": false, \"secure\": false, \"sameSite\": \"Lax\"}, {\"name\": \"s_fid\", \"value\": \"30605EAE0AB1D829-249819B6D0296FB8\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": 1760271890, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"Lax\"}, {\"name\": \"s_cc\", \"value\": \"true\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": -1, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"Lax\"}, {\"name\": \"mk_epub\", \"value\": \"%7B%22btuid%22%3A%22k0hlb4%22%2C%22prop57%22%3A%22www.us.homepage%22%7D\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": -1, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"Lax\"}, {\"name\": \"s_vi\", \"value\": \"[CS]v1|3475CB85969194DA-400013CCE2894040[CE]\", \"domain\": \".apple.com\", \"path\": \"/\", \"expires\": 1760271890.5513, \"httpOnly\": false, \"secure\": true, \"sameSite\": \"None\"}]"
+  },
+  "categorized_cookies": { "0": "{}", "1": "{}" }
+}
