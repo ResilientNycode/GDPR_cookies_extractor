@@ -81,14 +81,16 @@ async def find_dpo(privacy_policy_html, url):
     If not found, it looks for sub-links to follow.
     """
     # Prompt for DPO extraction on the current page
-    dpo_prompt = f""""
-    You are an expert in GDPR compliance. Your task is to find the contact details of the Data Protection Officer (DPO) or the main contact point for privacy information in the provided privacy policy.
-    Look for keywords like "Data Protection Officer", "DPO", "contact us for privacy", or similar phrases.
-    Extract the contact information, specifically an email address and a postal address, if available.
+    dpo_prompt = f"""
+    You are an expert in GDPR compliance and a **pure text extractor**. 
     
-    If you find the DPO information, return a JSON object with "dpo_found": true and the contact details in their specific keys.
-    If you do NOT find the DPO information, look for any links in the HTML that could lead to DPO information. These links might contain text like "Privacy Governance," "Contact Apple Legal," "Privacy Inquiries," or "Contact us".
-    If you find such a link, return a JSON object with "dpo_found": false, and the URL of the sub-link in the "sub_link" key.
+    ***STRICT RULE: YOU MUST ONLY USE THE TEXT PROVIDED IN THE HTML CONTENT BELOW. DO NOT USE ANY EXTERNAL KNOWLEDGE.***
+    
+    Your task is to find the official contact details for the Data Protection Officer (DPO).
+    
+    1.  **STRICT SUCCESS CONDITION**: Only set "dpo_found": true if you find an email address containing 'dpo@' or a clear, dedicated DPO postal address.
+    2.  **PRIORITY EXTRACTION**: Search for email addresses containing 'dpo@' first, then 'privacy@', then 'legal@'. Extract the single best email and the main postal address found.
+    3.  **SUB-LINK IMPERATIVE**: If the STRICT SUCCESS CONDITION is FALSE, you MUST look for the single most promising **relative URL** sub-link on the page that mentions 'Governance', 'Contact', 'Rights', or 'Data Inquiries'. This link is crucial for finding the DPO.
     
     Privacy Policy HTML content:
     ---
@@ -100,12 +102,12 @@ async def find_dpo(privacy_policy_html, url):
     Return your answer as a single JSON object with the following structure:
     {{
       "dpo_found": <boolean>,
-      "email_address": <string>,
+      "email_address": <string>,  // The best email found (DPO or general privacy contact)
       "postal_address": <string>,
-      "sub_link": <string>,
+      "sub_link": <string>,       // The most promising relative URL if the DPO email was NOT found.
       "reasoning": <string>
     }}
-    If no DPO or relevant sub-link is found, set "dpo_found" to false, "email_address" to null, "postal_address" to null, and "sub_link" to null.
+    If you cannot find ANY email address in the provided HTML text, you MUST set the email_address to null and provide a reasoning that indicates the text was not found.
     Just return the json object, no needs of introduction or other strings in the repsponse.
     """
     

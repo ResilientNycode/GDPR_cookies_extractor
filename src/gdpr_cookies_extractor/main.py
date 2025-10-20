@@ -86,24 +86,60 @@ async def main_async(sites_df):
                         logger.info(f"  Navigating to privacy policy page: {full_privacy_policy_url}")
                         
                         try:
+                            # 1. INITIAL HOP: Navigate to the general privacy policy page
                             dpo_page = await browser.new_page()
                             await dpo_page.goto(full_privacy_policy_url, timeout=60000)
                             privacy_policy_html = await dpo_page.content()
-                            await dpo_page.close()
 
+                            # Run Retention Analysis on the initial page (since it's a summary page)
                             logger.info("Analyzing privacy policy page for data retention...")
                             retention_output = await analyze_retention_policy(privacy_policy_html)
                             logger.info("Data retention analysis complete.")
-                            logger.info(retention_output)
                             
-                            logger.info("Analyzing privacy policy page for DPO information...")
+                            # Run DPO analysis on the initial page. This will return the DPO OR a sub_link.
+                            logger.info("Analyzing privacy policy page for DPO information (Initial Hop)...")
                             dpo_output = await find_dpo(privacy_policy_html, full_privacy_policy_url)
-                            logger.info("DPO analysis complete.")
-                            logger.info(dpo_output)
+                            logger.info(f"Initial DPO analysis complete. Sub-link found: {dpo_output.get('sub_link')}")
+                            
+                            
+                            # 2. MULTI-HOP CHECK: If DPO wasn't found and a sub_link was returned...
+                            if not dpo_output.get('dpo_found') and dpo_output.get('sub_link'):
+                                sub_link_url = dpo_output.get('sub_link')
+                                full_sub_link_url = urljoin(full_privacy_policy_url, sub_link_url)
+                                
+                                # --- START OF FIX: Prevent self-referencing links ---
+                                # Normalize URLs for strict comparison
+                                normalized_current_url = full_privacy_policy_url.rstrip('/')
+                                normalized_next_url = full_sub_link_url.rstrip('/')
+                                
+                                if normalized_next_url == normalized_current_url:
+                                    logger.info("  ⚠️ Multi-Hop skipped: Sub-link is redundant (same as current page).")
+                                    # We stop here because the LLM didn't find a new page to go to.
+                                    # The final dpo_output is the result from the initial analysis.
+                                    pass 
+                                else:
+                                    # --- Execute the valid second hop ---
+                                    logger.info(f"  Performing Multi-Hop: Navigating to sub-link: {full_sub_link_url}")
+                                    
+                                    # Navigate to the sub-link and get its HTML
+                                    # Use the same page object to avoid creating a new browser page
+                                    await dpo_page.goto(full_sub_link_url, timeout=60000)
+                                    sub_link_html = await dpo_page.content()
+                                    
+                                    # Re-run DPO analysis on the new, specific page (The Second Hop)
+                                    logger.info("  🧠 Re-analyzing new page for DPO (Second Hop)...")
+                                    second_dpo_output = await find_dpo(sub_link_html, full_sub_link_url)
+                                    logger.info("  ✅ Multi-Hop DPO analysis complete.")
+                                    
+                                    # Overwrite the result with the second, more specific hop's result
+                                    dpo_output = second_dpo_output
+                            
+                            await dpo_page.close()
                             
                         except Exception as e:
-                            logger.error(f"Error processing privacy policy page: {e}")
-                            dpo_output = {"dpo_found": False, "contact_info": None, "reasoning": f"Failed to navigate to privacy policy page: {e}"}
+                            logger.error(f"Error during privacy page navigation or multi-hop process: {e}")
+                            dpo_output = {"dpo_found": False, "contact_info": None, "reasoning": f"Failed during navigation/multi-hop: {e}"}
+                            
                     
                     await page.close()
                     
