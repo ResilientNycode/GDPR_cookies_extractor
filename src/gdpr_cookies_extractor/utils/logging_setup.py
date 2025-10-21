@@ -13,10 +13,8 @@ def setup_logging():
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     log_filename = os.path.join(output_dir, f"gdpr_analysis_{timestamp}.log")
 
-    # Define the logging format
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
 
-    # Configure the basic logger settings
     logging.basicConfig(
         level=logging.DEBUG,  
         format=log_format,
