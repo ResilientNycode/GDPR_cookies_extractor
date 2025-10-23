@@ -26,7 +26,6 @@ class PrivacyAnalyzer:
         This page is often linked from the footer, but can also be in a cookie banner, "About Us" section, or other legal notices.
         Analyze the provided HTML content and find the most likely URL for the privacy policy.
         Look for links containing keywords like 'privacy', 'policy', 'GDPR', 'data protection', 'cookie policy', or 'legal notice'.
-        The result must be returned as a JSON object.
         
         The HTML content to analyze is below:
         ---
@@ -35,6 +34,7 @@ class PrivacyAnalyzer:
         
         The URL of the page is: {url}
 
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
         Return your answer as a single JSON object with the following structure:
         {{
           "privacy_policy_url": <string>,
@@ -44,7 +44,6 @@ class PrivacyAnalyzer:
         Privacy_policy_url must be the complete URL to the privacy page. If no URL is found, set "result_found" to false and "privacy_policy_url" to null.
         In the reasoning field explain what words or other hints you have choosen to pick that privacy_policy_url as privacy page or why you didn't find it.
         In confidence_score field tell me from 0 to 1 how sure you are that the provided privacy_policy_url  is the correct one containing the privacy page.
-        Just return the json object, no needs of introduction or other strings in the response. 
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -74,6 +73,7 @@ class PrivacyAnalyzer:
         {privacy_policy_html}
         ---
         
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
         Return your answer as a single JSON object with the following structure:
         {{
           "retention_policy_summary": <string>,
@@ -84,7 +84,6 @@ class PrivacyAnalyzer:
         If no retention policy is found, set "retention_policy_summary" to null.
         In the reasoning field explain what words or other hints have you had to generate the retention_policy_summary field or why you didn't succeed.  
         In confidence_score field tell me from 0 to 1 how sure you are that the retention_policy_summary contains the correct information requested. 
-        Just return the json object, no needs of introduction or other strings in the repsponse.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -120,6 +119,7 @@ class PrivacyAnalyzer:
         {html_content}
         ---
 
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
         Return your answer as a single JSON object with the following structure:
         {{
           "email_address": <string> or null,
@@ -164,7 +164,11 @@ class PrivacyAnalyzer:
                         links.append(full_url)
             except Exception as e:
                 logger.debug(f"Could not process link: {e}")
-                
+        
+        for link in links:
+            if not isinstance(link, str):
+                logger.error(f"Found a non-string link: {link} of type {type(link)}")
+
         return list(set(links)) # Return unique links
 
     async def _analyze_dpo_sub_page_for_fan_out(self, page, url: str, site_url: str, scenario: str, hop_num: int) -> Dict[str, Any]:
@@ -251,7 +255,8 @@ class PrivacyAnalyzer:
         You are an expert in GDPR cookie compliance. Your task is to categorize a list of cookies based on their name and properties.
         For each cookie in the provided list, you must categorize it into one of the following types: "Strictly Necessary", "Functional", "Analytical", "Marketing", or "Uncategorized".
 
-        You MUST return a single JSON object. The keys of this object must be the category names. The value for each key must be a list of the cookie objects belonging to that category.
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
+        The keys of this object must be the category names. The value for each key must be a list of the cookie objects belonging to that category.
         
         Every single cookie from the input list must be present in the output.
 
