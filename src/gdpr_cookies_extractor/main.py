@@ -114,6 +114,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         # --- 4. DPO & Retention Analysis (if policy found) ---
         dpo_output = {"reasoning": "No privacy policy URL found."}
         retention_output = {"reasoning": "No privacy policy URL found."}
+        full_privacy_policy_url = None
 
         if llm_output.get("privacy_policy_url"):
             policy_url_path = llm_output.get("privacy_policy_url")
@@ -141,7 +142,8 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             third_party_count=third_party_count,
             llm_output=llm_output,
             dpo_output=dpo_output,
-            retention_output=retention_output
+            retention_output=retention_output,
+            privacy_policy_url=full_privacy_policy_url
         )
 
     except Exception as e:

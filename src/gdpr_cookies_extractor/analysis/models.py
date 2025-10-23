@@ -1,6 +1,6 @@
 import json
 from dataclasses import dataclass, asdict
-from typing import Optional
+from typing import Optional, List
 
 @dataclass
 class SiteAnalysisResult:
@@ -19,6 +19,7 @@ class SiteAnalysisResult:
     third_party_cookies_count: int = 0
     raw_cookies_data: str = "[]"
     categorized_cookies: str = "{}"
+    simple_extractor_links: Optional[List[str]] = None
 
     @staticmethod
     def from_outputs(
@@ -29,12 +30,14 @@ class SiteAnalysisResult:
         third_party_count: int,
         llm_output: dict,
         dpo_output: dict,
-        retention_output: dict
+        retention_output: dict,
+        privacy_policy_url: Optional[str] = None,
+        simple_extractor_links: Optional[List[str]] = None
     ) -> "SiteAnalysisResult":
         return SiteAnalysisResult(
             website_url=site_url,
             scenario=scenario,
-            privacy_policy_url=llm_output.get("privacy_policy_url"),
+            privacy_policy_url=privacy_policy_url,
             llm_reasoning=llm_output.get("reasoning"),
             dpo_email=dpo_output.get("email_address"),
             dpo_address=dpo_output.get("postal_address"),
@@ -46,7 +49,8 @@ class SiteAnalysisResult:
             cookies_count=len(cookies),
             third_party_cookies_count=third_party_count,
             raw_cookies_data=json.dumps(cookies),
-            categorized_cookies=json.dumps(cookie_categories)
+            categorized_cookies=json.dumps(cookie_categories),
+            simple_extractor_links=simple_extractor_links
         )
 
     @staticmethod
