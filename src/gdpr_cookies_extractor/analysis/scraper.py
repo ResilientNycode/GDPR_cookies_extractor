@@ -1,32 +1,37 @@
 import logging
+import json
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 
 logger = logging.getLogger(__name__)
 
+def load_selectors_from_config():
+    """Loads cookie banner selectors from config.json."""
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        return config['scraper']['cookie_banners']
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        logger.error(f"Error loading selectors from config.json: {e}")
+        # Fallback to default selectors if config is invalid or not found
+        return {
+            "accept_selectors": [
+                "text=Accept", "text=Accept All", "text=OK",
+                "role=button[name='Accept']", "role=button[name='Accept All']", "role=button[name='OK']"
+            ],
+            "reject_selectors": [
+                "text=Reject", "text=Reject All", "text=Deny",
+                "role=button[name='Reject']", "role=button[name='Reject All']", "role=button[name='Deny']"
+            ]
+        }
+
 async def handle_cookie_banner(page, action="accept"):
     """
     Finds and clicks the cookie banner button based on the desired action.
     """
-    # Define common selectors for "accept" and "reject" buttons.
-    # Playwright's locators (e.g., page.get_by_text) are powerful for this.
-    # 
-    accept_selectors = [
-        "text=Accept",
-        "text=Accept All",
-        "text=OK",
-        "role=button[name='Accept']",
-        "role=button[name='Accept All']",
-        "role=button[name='OK']"
-    ]
-    reject_selectors = [
-        "text=Reject",
-        "text=Reject All",
-        "text=Deny",
-        "role=button[name='Reject']",
-        "role=button[name='Reject All']",
-        "role=button[name='Deny']"
-    ]
+    selectors_config = load_selectors_from_config()
+    accept_selectors = selectors_config.get("accept_selectors", [])
+    reject_selectors = selectors_config.get("reject_selectors", [])
 
     target_selectors = accept_selectors if action == "accept" else reject_selectors
 
@@ -52,25 +57,19 @@ def simple_extractor(html_page):
     """
     A simple rule-based function to find privacy-related links using BeautifulSoup.
     """
-    # Beautiful Soup is a Python library for parsing HTML and XML documents.
-    # It creates a parse tree that can be used to extract data.
-    # "html.parser" is Python's built-in parser for this task.
     soup = BeautifulSoup(html_page, "html.parser")
 
     privacy_links = []
-    # Find all anchor tags that have an 'href' attribute.
     for a in soup.find_all("a", href=True):
         href = a["href"].lower()
-        # get_text() extracts the visible text, and strip=True removes whitespace.
         text = a.get_text(strip=True).lower()
         if "privacy" in href or "privacy" in text:
             privacy_links.append(a["href"])
 
     privacy_links = list(set(privacy_links))
 
-    logger.info("Privacy related links:")
-    for link in privacy_links:
-        logger.info(link)
+    logger.info(f"simple_extractor found {len(privacy_links)} privacy-related links.")
+    return privacy_links
 
 async def get_page_content(page, url):
     """

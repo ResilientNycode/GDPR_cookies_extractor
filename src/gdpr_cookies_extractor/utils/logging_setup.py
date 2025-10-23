@@ -7,7 +7,7 @@ def setup_logging():
     """
     Configures the logger to write to both a timestamped log file and the console.
     """
-    output_dir = "output"
+    output_dir = "logs"
     os.makedirs(output_dir, exist_ok=True)
     
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
