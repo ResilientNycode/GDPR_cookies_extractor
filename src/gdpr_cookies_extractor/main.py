@@ -6,71 +6,49 @@ import logging
 from playwright.async_api import async_playwright
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+from dataclasses import asdict
 
+# Import relativi (presupponendo la struttura del progetto)
 from .utils.logging_setup import *
 from .analysis.scraper import handle_cookie_banner, simple_extractor
 from .analysis.ollama_providers import OllamaProvider
 from .analysis.privacy_analyzers import PrivacyAnalyzer
 from .analysis.llm_interface import AbstractLLMClient
+from .analysis.models import SiteAnalysisResult
 
 logger = logging.getLogger(__name__)
 
 
-async def analyze_privacy_policy_page(browser, analyzer: PrivacyAnalyzer, policy_url: str) -> tuple:
+async def analyze_privacy_policy_page(browser, analyzer: PrivacyAnalyzer, policy_url: str, scenario: str) -> Dict[str, Any]:
     """
-    Navigates to a privacy policy page and analyzes it for DPO and retention info.
-    Handles the multi-hop logic for DPO discovery.
+    Navigates to a privacy policy page and analyzes it for retention info.
     """
-    dpo_output = {}
-    retention_output = {}
+    final_retention_output = {}
 
     try:
-        page = await browser.new_page()
-        await page.goto(policy_url, timeout=60000)
-        privacy_policy_html = await page.content()
+        initial_page = await browser.new_page()
+        await initial_page.goto(policy_url, timeout=60000)
+        privacy_policy_html = await initial_page.content()
 
-        # Run Retention Analysis
-        logger.info(f"Analyzing for data retention: {policy_url}")
-        retention_output = await analyzer.analyze_retention_policy(privacy_policy_html)
-        
-        # Run DPO analysis (Initial Hop)
-        logger.info(f"Analyzing for DPO (Hop 1): {policy_url}")
-        dpo_output = await analyzer.find_dpo(privacy_policy_html, policy_url)
-        
-        # Multi-Hop Check: If DPO not found and a valid sub_link exists
-        if not dpo_output.get('dpo_found') and dpo_output.get('sub_link'):
-            sub_link_url = dpo_output.get('sub_link')
-            full_sub_link_url = urljoin(policy_url, sub_link_url)
-            
-            # Prevent self-referencing loops
-            if full_sub_link_url.rstrip('/') != policy_url.rstrip('/'):
-                logger.info(f"Performing DPO Multi-Hop (Hop 2): {full_sub_link_url}")
-                await page.goto(full_sub_link_url, timeout=60000)
-                sub_link_html = await page.content()
-                
-                # Re-run DPO analysis on the new page
-                second_dpo_output = await analyzer.find_dpo(sub_link_html, full_sub_link_url)
-                dpo_output = second_dpo_output # Overwrite with the more specific result
-            else:
-                logger.warning(f"Multi-Hop skipped: Sub-link is same as current page: {policy_url}")
-        
-        await page.close()
-        return dpo_output, retention_output
+        logger.info(f"[{scenario}] Analyzing for data retention: {policy_url}")
+        final_retention_output = await analyzer.analyze_retention_policy(privacy_policy_html, policy_url)
+        await initial_page.close()
+
+        return final_retention_output
 
     except Exception as e:
-        logger.error(f"Error analyzing privacy page {policy_url}: {e}")
-        if page:
-            await page.close()
-        dpo_output_error = {"dpo_found": False, "email_address": None, "postal_address": None, "sub_link": None, "reasoning": f"Failed during privacy page analysis: {e}"}
-        retention_output_error = {"retention_found": False, "retention_policy_summary": None, "reasoning": f"Failed during privacy page analysis: {e}"}
-        return dpo_output_error, retention_output_error
+        logger.error(f"[{scenario}] Error analyzing privacy page {policy_url}: {e}")
+        retention_output_error = {"reasoning": f"Failed during privacy page analysis: {e}"}
+        # Correzione: ritorna il dizionario di errore
+        return retention_output_error
+        # Il codice originale aveva un grave errore di nesting qui
 
 
-async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str) -> Dict[str, Any]:
+async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
-    Returns a dictionary of results.
+    Returns a SiteAnalysisResult object.
     """
     logger.info(f"Processing: {site_url} (Scenario: {scenario})")
     page = None
@@ -83,82 +61,97 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         await page.wait_for_timeout(3000) # Wait for actions to apply
         
         cookies = await page.context.cookies()
-        logger.info(f"Captured {len(cookies)} cookies for {site_url} ('{scenario}').")
+        logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {site_url}.")
 
         # --- 2. Cookie Analysis ---
         cookie_categories = await analyzer.categorize_cookies(cookies)
         
         base_domain = urlparse(site_url).netloc.replace('www.', '')
         third_party_count = sum(1 for c in cookies if not c['domain'].replace('.', '').endswith(base_domain))
-        logger.info(f"Found {third_party_count} third-party cookies.")
+        logger.info(f"[{scenario}] Found {third_party_count} third-party cookies.")
         
         # --- 3. Find Privacy Policy ---
         html_content = await page.content()
-        simple_extractor(html_content) # Assuming this is a local utility
         
+        # Simple extractor for comparison
+        simple_links = simple_extractor(html_content)
+        logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
+
         llm_output = await analyzer.find_privacy_policy(html_content, site_url)
-        logger.info(f"Privacy policy search for {site_url} complete.")
+        logger.info(f"[{scenario}] Initial privacy policy search for {site_url} complete.")
+
+        found_policies = []
+        if llm_output.get("privacy_policy_url"):
+            found_policies.append(llm_output)
+
+        if not llm_output.get("privacy_policy_url"):
+            logger.info(f"[{scenario}] Privacy policy not found on main page. Searching internal links...")
+            internal_links = await analyzer._get_internal_links(page, site_url)
+            
+            promising_keywords = ['privacy', 'legal', 'terms', 'imprint', 'about', 'contact']
+            promising_links = [
+                link for link in internal_links 
+                if any(keyword in link.lower() for keyword in promising_keywords)
+            ]
+            
+            for link in promising_links:
+                try:
+                    logger.info(f"[{scenario}] Navigating to promising link: {link}")
+                    await page.goto(link, wait_until="domcontentloaded", timeout=30000)
+                    secondary_html = await page.content()
+                    secondary_output = await analyzer.find_privacy_policy(secondary_html, link)
+                    if secondary_output.get("privacy_policy_url"):
+                        logger.info(f"[{scenario}] Found potential privacy policy at: {link}")
+                        found_policies.append(secondary_output)
+                except Exception as e:
+                    logger.warning(f"[{scenario}] Could not analyze promising link {link}: {e}")
+                    continue
+        
+        if len(found_policies) > 0:
+            llm_output = max(found_policies, key=lambda x: x.get('confidence_score', 0.0))
+            logger.info(f"[{scenario}] Selected best privacy policy with score {llm_output.get('confidence_score')}: {llm_output.get('privacy_policy_url')}")
 
         # --- 4. DPO & Retention Analysis (if policy found) ---
-        dpo_output = {"dpo_found": False, "email_address": None, "postal_address": None, "sub_link": None, "reasoning": "No privacy policy URL found."}
-        retention_output = {"retention_found": False, "retention_policy_summary": None, "reasoning": "No privacy policy URL found."}
+        dpo_output = {"reasoning": "No privacy policy URL found."}
+        retention_output = {"reasoning": "No privacy policy URL found."}
 
-        if llm_output.get("result_found"):
+        if llm_output.get("privacy_policy_url"):
             policy_url_path = llm_output.get("privacy_policy_url")
             full_privacy_policy_url = urljoin(site_url, policy_url_path)
             
-            dpo_output, retention_output = await analyze_privacy_policy_page(
-                browser, analyzer, full_privacy_policy_url
-            )
+            # Esegui l'analisi della DPO e della retention in parallelo
+            dpo_task = asyncio.create_task(analyzer.find_dpo(
+                browser, full_privacy_policy_url, scenario
+            ))
+            
+            retention_task = asyncio.create_task(analyze_privacy_policy_page(
+                browser, analyzer, full_privacy_policy_url, scenario
+            ))
+            
+            dpo_output, retention_output = await asyncio.gather(dpo_task, retention_task)
             
         await page.close()
         
         # --- 5. Format Success Result ---
-        return {
-            "website_url": site_url,
-            "scenario": scenario,
-            "privacy_policy_url": llm_output.get("privacy_policy_url"),
-            "llm_found": llm_output.get("result_found"),
-            "llm_reasoning": llm_output.get("reasoning"),
-            "dpo_email": dpo_output.get("email_address"),
-            "dpo_address": dpo_output.get("postal_address"),
-            "dpo_found": dpo_output.get("dpo_found"),
-            "dpo_reasoning": dpo_output.get("reasoning"),
-            "retention_policy_summary": retention_output.get("retention_policy_summary"),
-            "retention_found": retention_output.get("retention_found"),
-            "retention_reasoning": retention_output.get("reasoning"),
-            "cookies_count": len(cookies),
-            "third_party_cookies_count": third_party_count,
-            "raw_cookies_data": json.dumps(cookies),
-            "categorized_cookies": json.dumps(cookie_categories)
-        }
+        return SiteAnalysisResult.from_outputs(
+            site_url=site_url,
+            scenario=scenario,
+            cookies=cookies,
+            cookie_categories=cookie_categories,
+            third_party_count=third_party_count,
+            llm_output=llm_output,
+            dpo_output=dpo_output,
+            retention_output=retention_output
+        )
 
     except Exception as e:
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
         if page:
             await page.close()
-        # --- 6. Format Error Result ---
-        return {
-            "website_url": site_url,
-            "scenario": scenario,
-            "privacy_policy_url": "N/A",
-            "llm_found": False,
-            "llm_reasoning": f"Failed to process: {e}",
-            "dpo_email": "N/A",
-            "dpo_address": "N/A",
-            "dpo_found": False,
-            "dpo_reasoning": f"Failed to process: {e}",
-            "retention_policy_summary": "N/A",
-            "retention_found": False,
-            "retention_reasoning": f"Failed to process: {e}",
-            "cookies_count": 0,
-            "third_party_cookies_count": 0,
-            "raw_cookies_data": "[]",
-            "categorized_cookies": "{}"
-        }
+        return SiteAnalysisResult.from_exception(site_url, scenario, e)
 
 
-async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser) -> List[Dict[str, Any]]:
+async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser) -> List[SiteAnalysisResult]:
     """
     Creates and runs all analysis tasks concurrently.
     """
@@ -171,33 +164,64 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
             site_url = 'https://' + site_url
             
         for scenario in scenarios:
-            # Create a task for each site/scenario combination
             tasks.append(
                 process_site_scenario(browser, analyzer, site_url, scenario)
             )
     
-    # Run all tasks concurrently and gather results
-    results = await asyncio.gather(*tasks) # unpack tasks
+    results = await asyncio.gather(*tasks)
     return results
 
 
-def save_results(results: List[Dict[str, Any]]):
+def save_results(results: List[SiteAnalysisResult]):
     """
-    Saves the list of result dictionaries to a timestamped JSON file.
+    Saves the list of result dataclasses to a timestamped JSON file.
     """
-    results_df = pd.DataFrame(results)
+    results_dicts = [asdict(result) for result in results]
+    results_df = pd.DataFrame(results_dicts)
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-    filename = f"analysis_results_{timestamp}.json"
+    filename = f"output/analysis_results_{timestamp}.json"
     results_df.to_json(filename, orient="records", indent=4)
     logger.info(f"Analysis complete. Results saved to {filename}")
+
+
+def load_llm_config():
+    """
+    Loads LLM configuration from config.json.
+    """
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        return config['llm']
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Could not load LLM config from config.json: {e}. Using default.")
+        return {"model": "llama3"}
+
+
+def load_scraper_config():
+    """
+    Loads scraper configuration from config.json.
+    """
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        return config['scraper']
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Could not load scraper config from config.json: {e}. Using default.")
+        return {"max_hops": 3}
 
 
 async def gdpr_analysis(sites_df):
     """
     Orchestrates the setup, execution, and saving of the analysis.
     """
-    llm_provider = OllamaProvider(model='llama3')
-    analyzer = PrivacyAnalyzer(llm_client=llm_provider)
+    llm_config = load_llm_config()
+    scraper_config = load_scraper_config()
+    
+    llm_provider = OllamaProvider(model=llm_config.get('model', 'llama3'))
+    analyzer = PrivacyAnalyzer(
+        llm_client=llm_provider,
+        max_hops=scraper_config.get('max_hops', 3)
+    )
     
     
     async with async_playwright() as p:
@@ -233,6 +257,7 @@ def main():
             sys.exit(1)
 
     asyncio.run(gdpr_analysis(sites_df))
+
 
 if __name__ == "__main__":
     main()

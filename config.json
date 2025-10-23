@@ -1,0 +1,26 @@
+{
+  "llm": {
+    "model": "llama3"
+  },
+  "scraper": {
+    "max_hops": 3,
+    "cookie_banners": {
+      "accept_selectors": [
+        "text=Accept",
+        "text=Accept All",
+        "text=OK",
+        "role=button[name='Accept']",
+        "role=button[name='Accept All']",
+        "role=button[name='OK']"
+      ],
+      "reject_selectors": [
+        "text=Reject",
+        "text=Reject All",
+        "text=Deny",
+        "role=button[name='Reject']",
+        "role=button[name='Reject All']",
+        "role=button[name='Deny']"
+      ]
+    }
+  }
+}

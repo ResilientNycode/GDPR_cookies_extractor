@@ -209,3 +209,4 @@ analysis_results.csv
 poetry.lock
 .~lock.analysis_results.csv#
 .python-version
+output/*
