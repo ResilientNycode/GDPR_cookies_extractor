@@ -143,7 +143,8 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             llm_output=llm_output,
             dpo_output=dpo_output,
             retention_output=retention_output,
-            privacy_policy_url=full_privacy_policy_url
+            privacy_policy_url=full_privacy_policy_url,
+            simple_extractor_links=simple_links
         )
 
     except Exception as e:
