@@ -114,6 +114,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         # --- 4. DPO & Retention Analysis (if policy found) ---
         dpo_output = {"reasoning": "No privacy policy URL found."}
         retention_output = {"reasoning": "No privacy policy URL found."}
+        cookie_declaration_output = {"reasoning": "No privacy policy URL found."}
         full_privacy_policy_url = None
 
         if llm_output.get("privacy_policy_url"):
@@ -128,11 +129,19 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             retention_task = asyncio.create_task(analyze_privacy_policy_page(
                 browser, analyzer, full_privacy_policy_url, scenario
             ))
+
+            cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
+                browser, full_privacy_policy_url, scenario
+            ))
             
-            dpo_output, retention_output = await asyncio.gather(dpo_task, retention_task)
+            dpo_output, retention_output, cookie_declaration_output = await asyncio.gather(dpo_task, retention_task, cookie_declaration_task)
             
         await page.close()
         
+        full_cookie_declaration_url = None
+        if cookie_declaration_output.get("cookie_declaration_url"):
+            full_cookie_declaration_url = urljoin(full_privacy_policy_url, cookie_declaration_output.get("cookie_declaration_url"))
+
         # --- 5. Format Success Result ---
         return SiteAnalysisResult.from_outputs(
             site_url=site_url,
@@ -143,8 +152,10 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             llm_output=llm_output,
             dpo_output=dpo_output,
             retention_output=retention_output,
+            cookie_declaration_output=cookie_declaration_output,
             privacy_policy_url=full_privacy_policy_url,
-            simple_extractor_links=simple_links
+            simple_extractor_links=simple_links,
+            cookie_declaration_url=full_cookie_declaration_url
         )
 
     except Exception as e:

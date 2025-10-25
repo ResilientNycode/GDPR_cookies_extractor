@@ -163,7 +163,7 @@ class PrivacyAnalyzer:
                     if urlparse(full_url).netloc == base_netloc and '#' not in full_url:
                         links.append(full_url)
             except Exception as e:
-                logger.debug(f"Could not process link: {e}")
+                logger.error(f"Could not process link: {e}")
         
         for link in links:
             if not isinstance(link, str):
@@ -244,7 +244,120 @@ class PrivacyAnalyzer:
             logger.error(f"[{scenario}] Error during DPO search for {site_url}: {e}")
             if page:
                 await page.close()
-            return {"reasoning": f"Failed during DPO search: {e}", "source_url": site_url}
+            return {"reasoning": f"Failed during DPO search: {e}", "source_url": None}
+
+    async def extract_cookie_declaration_url_from_page(self, html_content: str, url: str):
+        """
+        Analyzes the HTML of a given page to find the cookie declaration page URL.
+        """
+        prompt = f"""
+        You are an expert web analysis agent. Your task is to find the URL of the cookie declaration or cookie settings page for the given website. The URL cannot be a Javascript file!
+        This page is often linked from the privacy policy or a cookie banner.
+        Analyze the provided HTML content and find the most likely URL for the cookie declaration page.
+        Look for links containing keywords like 'cookie', 'technologies', or 'cookie and other technologies'.
+        
+        The HTML content to analyze is below:
+        ---
+        {html_content}
+        ---
+        
+        The URL of the page is: {url}
+
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
+        Return your answer as a single JSON object with the following structure:
+        {{
+          "cookie_declaration_url": <string>,
+          "reasoning": <string>,
+          "confidence_score": <number>
+        }}
+        cookie_declaration_url must be a full URL not a sub path
+
+        """
+        
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "cookie_declaration_url": None,
+                "reasoning": response.error,
+                "confidence_score": 0.0
+            }
+        
+        return response.data
+
+    async def _analyze_cookie_sub_page_for_fan_out(self, page, url: str, site_url: str, scenario: str, hop_num: int) -> Dict[str, Any]:
+        """
+        Helper to analyze a sub-page for cookie declaration URL during fan-out search.
+        """
+        try:
+            logger.info(f"[{scenario}] Analyzing for cookie declaration (Fan-out Hop {hop_num}): {url}")
+            await page.goto(url, timeout=60000)
+            html = await page.content()
+            cookie_decl_output = await self.extract_cookie_declaration_url_from_page(html, url)
+            await page.close()
+            return cookie_decl_output
+        except Exception as e:
+            logger.error(f"[{scenario}] Error analyzing cookie declaration sub-page {url}: {e}")
+            await page.close()
+            return {}
+
+    async def find_cookie_declaration_page(self, browser, site_url: str, scenario: str) -> Dict[str, Any]:
+        """
+        Navigates the site to find the cookie declaration page.
+        """
+        page = None
+        try:
+            logger.info(f"[{scenario}] Starting cookie declaration page search for: {site_url} using internal link navigation.")
+            
+            page = await browser.new_page()
+            await page.goto(site_url, timeout=60000)
+            html_content = await page.content()
+            initial_output = await self.extract_cookie_declaration_url_from_page(html_content, site_url)
+            
+            final_output = {}
+
+            if initial_output.get('cookie_declaration_url'):
+                logger.info(f"[{scenario}] Cookie declaration page found on initial page: {initial_output.get('cookie_declaration_url')}")
+                final_output = initial_output
+            else:
+                logger.info(f"[{scenario}] Cookie declaration page not found directly. Starting fan-out search.")
+                
+                internal_links = await self._get_internal_links(page, site_url)
+                
+                promising_keywords = ['cookie', 'technologies']
+                promising_links = [
+                    link for link in internal_links 
+                    if any(keyword in link.lower() for keyword in promising_keywords)
+                ]
+                
+                search_tasks = []
+                for i, link in enumerate(promising_links):
+                    if i >= self.max_hops:
+                        logger.warning(f"[{scenario}] Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
+                        break
+                    
+                    task_page = await browser.new_page()
+                    task = asyncio.create_task(self._analyze_cookie_sub_page_for_fan_out(task_page, link, site_url, scenario, i + 1))
+                    search_tasks.append(task)
+                
+                found_pages = await asyncio.gather(*search_tasks)
+                
+                valid_pages = [p for p in found_pages if p and p.get('cookie_declaration_url')]
+                
+                if valid_pages:
+                    final_output = valid_pages[0]
+                    logger.info(f"[{scenario}] Cookie declaration page found via fan-out search: {final_output.get('cookie_declaration_url')}")
+                else:
+                    final_output = {"reasoning": "No cookie declaration page found after extensive internal link search.", "source_url": site_url}
+
+            await page.close()
+            return final_output
+
+        except Exception as e:
+            logger.error(f"[{scenario}] Error during cookie declaration page search for {site_url}: {e}")
+            if page:
+                await page.close()
+            return {"reasoning": f"Failed during cookie declaration page search: {e}", "source_url": None}
 
     async def categorize_cookies(self, cookies_data: list):
         """
@@ -255,12 +368,12 @@ class PrivacyAnalyzer:
         You are an expert in GDPR cookie compliance. Your task is to categorize a list of cookies based on their name and properties.
         For each cookie in the provided list, you must categorize it into one of the following types: "Strictly Necessary", "Functional", "Analytical", "Marketing", or "Uncategorized".
 
-        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
+        You MUST return a single JSON object and nothing else! Do not include any text or explanation before or after the JSON object.
         The keys of this object must be the category names. The value for each key must be a list of the cookie objects belonging to that category.
         
         Every single cookie from the input list must be present in the output.
 
-        EXAMPLE OUTPUT STRUCTURE:
+        EXAMPLE OUTPUT JSON STRUCTURE:
         {{
           "Strictly Necessary": [
             {{"name": "cookie_name_1", "domain": "example.com", ...}},

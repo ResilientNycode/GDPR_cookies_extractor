@@ -15,6 +15,7 @@ class SiteAnalysisResult:
     retention_policy_summary: Optional[str] = None
     retention_reasoning: Optional[str] = None
     retention_policy_url: Optional[str] = None
+    cookie_declaration_url: Optional[str] = None
     cookies_count: int = 0
     third_party_cookies_count: int = 0
     raw_cookies_data: str = "[]"
@@ -31,8 +32,10 @@ class SiteAnalysisResult:
         llm_output: dict,
         dpo_output: dict,
         retention_output: dict,
+        cookie_declaration_output: dict,
         privacy_policy_url: Optional[str] = None,
-        simple_extractor_links: Optional[List[str]] = None
+        simple_extractor_links: Optional[List[str]] = None,
+        cookie_declaration_url: Optional[str] = None
     ) -> "SiteAnalysisResult":
         return SiteAnalysisResult(
             website_url=site_url,
@@ -46,6 +49,7 @@ class SiteAnalysisResult:
             retention_policy_summary=retention_output.get("retention_policy_summary"),
             retention_reasoning=retention_output.get("reasoning"),
             retention_policy_url=retention_output.get("source_url"),
+            cookie_declaration_url=cookie_declaration_url,
             cookies_count=len(cookies),
             third_party_cookies_count=third_party_count,
             raw_cookies_data=json.dumps(cookies),
