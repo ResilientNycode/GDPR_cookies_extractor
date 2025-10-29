@@ -160,7 +160,7 @@ class PrivacyAnalyzer:
                 href = await a.get_attribute('href')
                 if href:
                     full_url = urljoin(site_url, href)
-                    if urlparse(full_url).netloc == base_netloc and '#' not in full_url:
+                    if urlparse(full_url).netloc == base_netloc and '#' not in full_url and not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf')):
                         links.append(full_url)
             except Exception as e:
                 logger.error(f"Could not process link: {e}")
@@ -251,10 +251,12 @@ class PrivacyAnalyzer:
         Analyzes the HTML of a given page to find the cookie declaration page URL.
         """
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the URL of the cookie declaration or cookie settings page for the given website. The URL cannot be a Javascript file!
+        You are an expert web analysis agent. Your task is to find the URL of the cookie declaration or cookie settings page for the given website.
+        This URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
         This page is often linked from the privacy policy or a cookie banner.
         Analyze the provided HTML content and find the most likely URL for the cookie declaration page.
         Look for links containing keywords like 'cookie', 'technologies', or 'cookie and other technologies'.
+        Examples of INVALID URLs: /static/js/cookie-script.js, /assets/css/styles.css, /images/cookie-icon.png
         
         The HTML content to analyze is below:
         ---
@@ -270,7 +272,7 @@ class PrivacyAnalyzer:
           "reasoning": <string>,
           "confidence_score": <number>
         }}
-        cookie_declaration_url must be a full URL not a sub path
+        cookie_declaration_url must be a full URL not a sub path. If no URL is found, set "cookie_declaration_url" to null.
 
         """
         
@@ -285,6 +287,45 @@ class PrivacyAnalyzer:
         
         return response.data
 
+    async def is_cookie_declaration_page(self, html_content: str, url: str):
+        """
+        Analyzes the HTML of a given page to determine if it is a cookie declaration page.
+        """
+        prompt = f"""
+        You are an expert web analysis agent. Your task is to determine if the given HTML content represents a cookie declaration page.
+        A cookie declaration page lists the cookies used on the site, often grouped by category (e.g., necessary, marketing, analytics).
+        Analyze the provided HTML content and determine if it contains a detailed list of cookies.
+
+        The HTML content to analyze is below:
+        ---
+        {html_content}
+        ---
+
+        The URL of the page is: {url}
+
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
+        Return your answer as a single JSON object with the following structure:
+        {{
+          "is_cookie_declaration": <boolean>,
+          "reasoning": <string>,
+          "confidence_score": <number>
+        }}
+        - "is_cookie_declaration": true if the page contains a cookie declaration, false otherwise.
+        - "reasoning": Explain your decision.
+        - "confidence_score": A score from 0.0 to 1.0 on your certainty.
+        """
+        
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "is_cookie_declaration": False,
+                "reasoning": response.error,
+                "confidence_score": 0.0
+            }
+        
+        return response.data
+
     async def _analyze_cookie_sub_page_for_fan_out(self, page, url: str, site_url: str, scenario: str, hop_num: int) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for cookie declaration URL during fan-out search.
@@ -293,9 +334,15 @@ class PrivacyAnalyzer:
             logger.info(f"[{scenario}] Analyzing for cookie declaration (Fan-out Hop {hop_num}): {url}")
             await page.goto(url, timeout=60000)
             html = await page.content()
-            cookie_decl_output = await self.extract_cookie_declaration_url_from_page(html, url)
+            analysis = await self.is_cookie_declaration_page(html, url)
             await page.close()
-            return cookie_decl_output
+            if analysis.get("is_cookie_declaration") and analysis.get("confidence_score", 0) > 0.7:
+                return {
+                    "cookie_declaration_url": url,
+                    "reasoning": analysis.get("reasoning"),
+                    "confidence_score": analysis.get("confidence_score")
+                }
+            return {}
         except Exception as e:
             logger.error(f"[{scenario}] Error analyzing cookie declaration sub-page {url}: {e}")
             await page.close()
@@ -312,43 +359,47 @@ class PrivacyAnalyzer:
             page = await browser.new_page()
             await page.goto(site_url, timeout=60000)
             html_content = await page.content()
-            initial_output = await self.extract_cookie_declaration_url_from_page(html_content, site_url)
             
-            final_output = {}
+            # 1. Check if the current page is the cookie declaration page
+            analysis = await self.is_cookie_declaration_page(html_content, site_url)
+            if analysis.get("is_cookie_declaration") and analysis.get("confidence_score", 0) > 0.7:
+                logger.info(f"[{scenario}] Cookie declaration found on the initial page: {site_url}")
+                await page.close()
+                return {
+                    "cookie_declaration_url": site_url,
+                    "reasoning": analysis.get("reasoning"),
+                    "confidence_score": analysis.get("confidence_score")
+                }
 
-            if initial_output.get('cookie_declaration_url'):
-                logger.info(f"[{scenario}] Cookie declaration page found on initial page: {initial_output.get('cookie_declaration_url')}")
-                final_output = initial_output
+            logger.info(f"[{scenario}] Initial page is not a cookie declaration page. Starting fan-out search.")
+            
+            internal_links = await self._get_internal_links(page, site_url)
+            
+            promising_keywords = ['cookie', 'technologies']
+            promising_links = [
+                link for link in internal_links 
+                if any(keyword in link.lower() for keyword in promising_keywords)
+            ]
+            
+            search_tasks = []
+            for i, link in enumerate(promising_links):
+                if i >= self.max_hops:
+                    logger.warning(f"[{scenario}] Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
+                    break
+                
+                task_page = await browser.new_page()
+                task = asyncio.create_task(self._analyze_cookie_sub_page_for_fan_out(task_page, link, site_url, scenario, i + 1))
+                search_tasks.append(task)
+            
+            found_pages = await asyncio.gather(*search_tasks)
+            
+            valid_pages = [p for p in found_pages if p and p.get('cookie_declaration_url')]
+            
+            if valid_pages:
+                final_output = valid_pages[0]
+                logger.info(f"[{scenario}] Cookie declaration page found via fan-out search: {final_output.get('cookie_declaration_url')}")
             else:
-                logger.info(f"[{scenario}] Cookie declaration page not found directly. Starting fan-out search.")
-                
-                internal_links = await self._get_internal_links(page, site_url)
-                
-                promising_keywords = ['cookie', 'technologies']
-                promising_links = [
-                    link for link in internal_links 
-                    if any(keyword in link.lower() for keyword in promising_keywords)
-                ]
-                
-                search_tasks = []
-                for i, link in enumerate(promising_links):
-                    if i >= self.max_hops:
-                        logger.warning(f"[{scenario}] Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
-                        break
-                    
-                    task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_cookie_sub_page_for_fan_out(task_page, link, site_url, scenario, i + 1))
-                    search_tasks.append(task)
-                
-                found_pages = await asyncio.gather(*search_tasks)
-                
-                valid_pages = [p for p in found_pages if p and p.get('cookie_declaration_url')]
-                
-                if valid_pages:
-                    final_output = valid_pages[0]
-                    logger.info(f"[{scenario}] Cookie declaration page found via fan-out search: {final_output.get('cookie_declaration_url')}")
-                else:
-                    final_output = {"reasoning": "No cookie declaration page found after extensive internal link search.", "source_url": site_url}
+                final_output = {"reasoning": "No cookie declaration page found after extensive internal link search.", "source_url": site_url, "cookie_declaration_url": None}
 
             await page.close()
             return final_output
@@ -357,7 +408,7 @@ class PrivacyAnalyzer:
             logger.error(f"[{scenario}] Error during cookie declaration page search for {site_url}: {e}")
             if page:
                 await page.close()
-            return {"reasoning": f"Failed during cookie declaration page search: {e}", "source_url": None}
+            return {"reasoning": f"Failed during cookie declaration page search: {e}", "source_url": None, "cookie_declaration_url": None}
 
     async def categorize_cookies(self, cookies_data: list):
         """
@@ -415,7 +466,7 @@ class PrivacyAnalyzer:
         """
         prompt = f"""
         You are an expert in GDPR and web analysis. Your task is to find the link (URL) to the specific page where a user can manage, access, or delete their personal data.
-        The URL cannot be a Javascript file!
+        This URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
 
         Analyze the provided HTML and search for the most likely link. 
         Look for keywords such as:
@@ -426,6 +477,7 @@ class PrivacyAnalyzer:
         - "data subject rights"
         - "right to erasure"
         - "manage your data"
+        Examples of INVALID URLs: /static/js/delete-script.js, /assets/css/styles.css, /images/delete-icon.png
 
         The URL of the page being analyzed is: {url}
 
