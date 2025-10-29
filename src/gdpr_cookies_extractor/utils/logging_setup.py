@@ -16,7 +16,7 @@ def setup_logging():
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
 
     logging.basicConfig(
-        level=logging.INFO,  
+        level=logging.DEBUG,  
         format=log_format,
         handlers=[
             logging.FileHandler(log_filename),

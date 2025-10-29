@@ -12,7 +12,7 @@ class OllamaProvider(AbstractLLMClient):
     
     def __init__(self, 
                  model: str = 'llama3', 
-                 default_system_prompt: str = 'You are a helpful assistant that provides JSON output about GDPR and privacy.'):
+                 default_system_prompt: str = 'You are a helpful assistant that provides only a clean JSON output about GDPR and privacy.'):
         
         self.model = model
         self.default_system_prompt = default_system_prompt
@@ -34,6 +34,7 @@ class OllamaProvider(AbstractLLMClient):
                     {'role': 'system', 'content': system_prompt},
                     {'role': 'user', 'content': user_prompt}
                 ],
+                format='json',
                 options={
                     'temperature': 0.0  # avoid hallucinathions
                 }

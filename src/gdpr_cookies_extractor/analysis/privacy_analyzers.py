@@ -76,7 +76,7 @@ class PrivacyAnalyzer:
         You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
         Return your answer as a single JSON object with the following structure:
         {{
-          "retention_policy_summary": <string>,
+          "retention_policy_summary": <string>, 
           "reasoning": <string>,
           "confidence_score": <number>,
           "source_url": "{url}"
@@ -364,30 +364,38 @@ class PrivacyAnalyzer:
         Categorizes a list of cookies using the LLM.
         """
         cookies_json_list = json.dumps(cookies_data, indent=2)
+        # logger.info(f"Cookies to categorize: {cookies_json_list}")
         prompt = f"""
-        You are an expert in GDPR cookie compliance. Your task is to categorize a list of cookies based on their name and properties.
-        For each cookie in the provided list, you must categorize it into one of the following types: "Strictly Necessary", "Functional", "Analytical", "Marketing", or "Uncategorized".
+        You are a JSON generator. Your only function is to categorize the provided list of cookies into a JSON object.
 
-        You MUST return a single JSON object and nothing else! Do not include any text or explanation before or after the JSON object.
-        The keys of this object must be the category names. The value for each key must be a list of the cookie objects belonging to that category.
-        
-        Every single cookie from the input list must be present in the output.
+        **Input:** A JSON list of cookie objects.
+        **Output:** A single JSON object.
 
-        EXAMPLE OUTPUT JSON STRUCTURE:
-        {{
-          "Strictly Necessary": [
-            {{"name": "cookie_name_1", "domain": "example.com", ...}},
-            {{"name": "cookie_name_2", "domain": "example.com", ...}}
-          ],
-          "Functional": [
-            {{"name": "cookie_name_3", "domain": "example.com", ...}}
-          ],
-          "Analytical": [],
-          "Marketing": [],
-          "Uncategorized": []
-        }}
+        **Instructions:**
+        1.  You will be given a JSON list of cookies.
+        2.  You MUST categorize every single cookie from the input list.
+        3.  The output MUST be a single JSON object.
+        4.  The JSON object must have a single root key named "cookie_categories".
+        5.  The value of "cookie_categories" must be a list of JSON objects.
+        6.  Each object in the list represents a category and MUST have the following two keys:
+            - "category_name": A string with the name of the category (e.g., "Strictly Necessary", "Functional", "Analytical", "Marketing", "Uncategorized").
+            - "cookies": A list of the input cookies with name and if possible a description of what does the specific cookie.
 
-        Cookies to categorize:
+        **Do NOT include any text, explanation, or markdown before or after the JSON object.**
+
+        **Example of the required output format:**
+        {{{{
+          "cookie_categories": [
+            {{
+              "category_name": "Functional",
+              "cookies": [
+                {{ "name": "name of the cookie", "description": "brief description of what the cookies is used for",  "domain": "domain of the site" }}
+              ]
+            }}
+          ]
+        }}}}
+
+        **Input Cookies to categorize:**
         {cookies_json_list}
         """
         
@@ -395,6 +403,138 @@ class PrivacyAnalyzer:
         
         if not response.success:
             logger.error(f"Cookie categorization failed: {response.error}")
-            return {} # Return empty dict on failure
+            return {{}} # Return empty dict on failure
             
         return response.data
+    
+
+    async def extract_data_deletion_url_from_page(self, html_content: str, url: str):
+        """
+        Analyzes the HTML of a given page to find the URL of the page
+        dedicated to managing or deleting personal data.
+        """
+        prompt = f"""
+        You are an expert in GDPR and web analysis. Your task is to find the link (URL) to the specific page where a user can manage, access, or delete their personal data.
+        The URL cannot be a Javascript file!
+
+        Analyze the provided HTML and search for the most likely link. 
+        Look for keywords such as:
+        - "delete your data"
+        - "close your account"
+        - "how to access and control your personal data"
+        - "privacy dashboard"
+        - "data subject rights"
+        - "right to erasure"
+        - "manage your data"
+
+        The URL of the page being analyzed is: {url}
+
+        HTML content to analyze:
+        ---
+        {html_content}
+        ---
+        
+        You MUST return a single JSON object and nothing else. Do not include any text or explanation.
+        Return your answer as a single JSON object with this structure:
+        {{
+          "deletion_page_url": <string> or null,
+          "reasoning": <string>,
+          "confidence_score": <number>,
+          "source_url": "{url}"
+        }}
+
+        - "deletion_page_url": The full URL that leads to the data management/deletion page.
+        - "reasoning": Briefly explain what keywords or hints led you to that URL.
+        - "confidence_score": A score from 0.0 to 1.0 on your certainty.
+        """
+        
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "deletion_page_url": None,
+                "reasoning": response.error,
+                "confidence_score": 0.0,
+                "source_url": url
+            }
+        
+        return response.data
+
+    async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, site_url: str, scenario: str, hop_num: int) -> Dict[str, Any]:
+        """
+        Helper to analyze a sub-page for the data deletion URL during fan-out search.
+        """
+        try:
+            logger.info(f"[{scenario}] Analyzing for data deletion (Fan-out Hop {hop_num}): {url}")
+            await page.goto(url, timeout=60000)
+            html = await page.content()
+            deletion_output = await self.extract_data_deletion_url_from_page(html, url)
+            await page.close()
+            return deletion_output
+        except Exception as e:
+            logger.error(f"[{scenario}] Error analyzing data deletion sub-page {url}: {e}")
+            await page.close()
+            return {}
+
+    async def find_data_deletion_page(self, browser, site_url: str, scenario: str) -> Dict[str, Any]:
+        """
+        Navigates the site to find the data deletion/management page (e.g., Privacy Dashboard).
+        'site_url' should be the URL of the main privacy policy page.
+        """
+        page = None
+        try:
+            logger.info(f"[{scenario}] Starting data deletion page search for: {site_url}")
+            
+            page = await browser.new_page()
+            await page.goto(site_url, timeout=60000)
+            html_content = await page.content()
+            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url)
+            
+            final_output = {}
+
+            if initial_output.get('deletion_page_url'):
+                logger.info(f"[{scenario}] Data deletion page found on initial page: {initial_output.get('deletion_page_url')}")
+                final_output = initial_output
+            else:
+                logger.info(f"[{scenario}] Data deletion page not found. Starting fan-out search.")
+                
+                internal_links = await self._get_internal_links(page, site_url)
+                
+                # Keywords to filter links (in the URLs)
+                promising_keywords = [
+                    'privacy', 'account', 'delete', 'erasure', 'rights', 
+                    'manage', 'control', 'dashboard', 'data'
+                ]
+                promising_links = [
+                    link for link in internal_links 
+                    if any(keyword in link.lower() for keyword in promising_keywords)
+                ]
+                
+                search_tasks = []
+                for i, link in enumerate(promising_links):
+                    if i >= self.max_hops:
+                        logger.warning(f"[{scenario}] Reached max_hops limit ({self.max_hops}).")
+                        break
+                    
+                    task_page = await browser.new_page()
+                    task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, site_url, scenario, i + 1))
+                    search_tasks.append(task)
+                
+                found_pages = await asyncio.gather(*search_tasks)
+                
+                valid_pages = [p for p in found_pages if p and p.get('deletion_page_url')]
+                
+                if valid_pages:
+                    final_output = valid_pages[0] # Take the first valid result
+                    logger.info(f"[{scenario}] Data deletion page found via fan-out search: {final_output.get('deletion_page_url')}")
+                else:
+                    final_output = {"reasoning": "No data deletion page found after search.", "source_url": site_url}
+
+            await page.close()
+            return final_output
+
+        except Exception as e:
+            logger.error(f"[{scenario}] Error during data deletion page search for {site_url}: {e}")
+            if page:
+                await page.close()
+            return {"reasoning": f"Failed during data deletion search: {e}", "source_url": None}

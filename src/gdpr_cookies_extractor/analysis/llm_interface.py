@@ -40,20 +40,28 @@ class AbstractLLMClient(ABC):
         A helper utility that can be shared by all implementations
         to robustly parse JSON from the LLM's raw response.
         """
-        # Find the start of the JSON object
-        start_index = raw_content.find('{')
-        if start_index == -1:
-            raise ValueError("No JSON object found in the response.")
+        json_string = None
 
-        # Find the end of the JSON object
-        end_index = raw_content.rfind('}') + 1
-        if end_index == 0:
-            raise ValueError("No JSON object found in the response.")
+        # Try to extract JSON from a markdown code block
+        match = re.search(r'```json\n(.*?)\n```', raw_content, re.DOTALL)
+        if match:
+            json_string = match.group(1)
+        else:
+            match = re.search(r'```\n(.*?)\n```', raw_content, re.DOTALL)
+            if match:
+                json_string = match.group(1)
 
-        json_string = raw_content[start_index:end_index]
-        
-        # # Remove comments from JSON
-        # json_string = re.sub(r'//.*\n', '\n', json_string)
+        if json_string is None:
+            # Fallback to finding the first and last JSON object
+            start_index = raw_content.find('{')
+            if start_index == -1:
+                raise ValueError("No JSON object found in the response.")
+
+            end_index = raw_content.rfind('}') + 1
+            if end_index == 0:
+                raise ValueError("No JSON object found in the response.")
+
+            json_string = raw_content[start_index:end_index]
         
         # Remove invalid control characters from JSON string
         # This regex matches control characters (U+0000 to U+001F) excluding tab (U+0009), newline (U+000A), and carriage return (U+000D)
