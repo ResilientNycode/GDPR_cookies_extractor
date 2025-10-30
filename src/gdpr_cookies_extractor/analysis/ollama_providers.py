@@ -41,7 +41,7 @@ class OllamaProvider(AbstractLLMClient):
             )
 
             raw_content = response['message']['content']
-            logger.info(f"Raw Ollama response: {raw_content}")
+            logger.debug(f"Raw Ollama response: {raw_content}")
             
             json_string = self._parse_json_response(raw_content)
             parsed_data = json.loads(json_string)

@@ -2,6 +2,7 @@ import logging
 import sys
 import os
 from datetime import datetime
+import json
 
 def setup_logging():
     """
@@ -15,8 +16,19 @@ def setup_logging():
 
     log_format = '%(asctime)s - %(levelname)s - %(message)s'
 
+    # Load log level from config.json or default to INFO
+    log_level_str = "DEBUG"
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        log_level_str = config.get('logging', {}).get('level', 'DEBUG').upper()
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        pass # Use default INFO
+
+    log_level = getattr(logging, log_level_str, logging.INFO)
+
     logging.basicConfig(
-        level=logging.DEBUG,  
+        level=log_level,  
         format=log_format,
         handlers=[
             logging.FileHandler(log_filename),

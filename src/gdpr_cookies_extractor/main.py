@@ -11,6 +11,7 @@ from dataclasses import asdict
 
 # Import relativi (presupponendo la struttura del progetto)
 from .utils.logging_setup import *
+from .utils.cookie_helpers import simplify_cookies, count_third_party_cookies
 from .analysis.scraper import handle_cookie_banner, simple_extractor
 from .analysis.ollama_providers import OllamaProvider
 from .analysis.privacy_analyzers import PrivacyAnalyzer
@@ -20,168 +21,91 @@ from .analysis.models import SiteAnalysisResult
 logger = logging.getLogger(__name__)
 
 
-async def analyze_privacy_policy_page(browser, analyzer: PrivacyAnalyzer, policy_url: str, scenario: str) -> Dict[str, Any]:
-    """
-    Navigates to a privacy policy page and analyzes it for retention info.
-    """
-    final_retention_output = {}
-
-    try:
-        initial_page = await browser.new_page()
-        await initial_page.goto(policy_url, timeout=60000)
-        privacy_policy_html = await initial_page.content()
-
-        logger.info(f"[{scenario}] Analyzing for data retention: {policy_url}")
-        final_retention_output = await analyzer.analyze_retention_policy(privacy_policy_html, policy_url)
-        await initial_page.close()
-
-        return final_retention_output
-
-    except Exception as e:
-        logger.error(f"[{scenario}] Error analyzing privacy page {policy_url}: {e}")
-        retention_output_error = {"reasoning": f"Failed during privacy page analysis: {e}"}
-        # Correzione: ritorna il dizionario di errore
-        return retention_output_error
-        # Il codice originale aveva un grave errore di nesting qui
-
-
 async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
     Returns a SiteAnalysisResult object.
     """
     logger.info(f"Processing: {site_url} (Scenario: {scenario})")
-    page = None
     try:
-        page = await browser.new_page()
-        
-        # --- 1. Navigation and Cookie Handling ---
-        await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
-        await handle_cookie_banner(page, action=scenario)
-        await page.wait_for_timeout(3000) # Wait for actions to apply
-        
-        cookies = await page.context.cookies()
-        logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {site_url}.")
+        async with await browser.new_page() as page:
+            # --- 1. Navigation and Cookie Handling ---
+            await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
+            await handle_cookie_banner(page, action=scenario)
+            await page.wait_for_timeout(3000)  # Wait for actions to apply
 
-        # --- 2. Cookie Analysis ---
-        logger.debug(f"Cookies content: {cookies}")
-        logger.debug("Simplifying cookies...")
-        simplified_cookies = []
-        for c in cookies:
-            logger.debug(f"Processing cookie: {c}")
-            simplified_cookies.append({"name": c.get("name"), "domain": c.get("domain")})
-        logger.debug("Cookies simplified.")
+            cookies = await page.context.cookies()
+            logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {site_url}.")
 
-        logger.debug("Categorizing cookies...")
-        cookie_categories = await analyzer.categorize_cookies(simplified_cookies)
-        
-        logger.debug("Parsing base domain...")
-        base_domain = urlparse(site_url).netloc.replace('www.', '')
-        logger.debug("Counting third-party cookies...")
-        third_party_count = sum(1 for c in cookies if not c['domain'].replace('.', '').endswith(base_domain))
-        logger.info(f"[{scenario}] Found {third_party_count} third-party cookies.")
-        
-        # --- 3. Find Privacy Policy ---
-        logger.debug("Getting page content...")
-        html_content = await page.content()
-        
-        logger.debug("Running simple extractor...")
-        simple_links = simple_extractor(html_content)
-        logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
+            # --- 2. Cookie Analysis ---
+            logger.debug(f"Cookies content: {cookies}")
+            simplified_cookies = simplify_cookies(cookies)
 
-        llm_output = await analyzer.find_privacy_policy(html_content, site_url)
-        logger.info(f"[{scenario}] Initial privacy policy search for {site_url} complete.")
+            logger.debug("Categorizing cookies...")
+            cookie_categories = await analyzer.categorize_cookies(simplified_cookies)
 
-        found_policies = []
-        if llm_output.get("privacy_policy_url"):
-            found_policies.append(llm_output)
+            third_party_count = count_third_party_cookies(site_url, cookies)
 
-        if not llm_output.get("privacy_policy_url"):
-            logger.info(f"[{scenario}] Privacy policy not found on main page. Searching internal links...")
-            internal_links = await analyzer._get_internal_links(page, site_url)
+            # --- 3. Find Privacy Policy ---
+            logger.debug("Getting page content for simple extractor...")
+            html_content = await page.content()
+            simple_links = simple_extractor(html_content)
+            logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
+
+            # This single call now handles the initial search, deep search, and finds the best policy.
+            llm_output = await analyzer.find_privacy_policy(page, site_url)
+
+            # --- 4. DPO & Retention Analysis (if policy found) ---
+            analyses_results = {}
+            full_privacy_policy_url = None
             
-            promising_keywords = ['privacy', 'legal', 'terms', 'imprint', 'about', 'contact']
-            promising_links = [
-                link for link in internal_links 
-                if any(keyword in link.lower() for keyword in promising_keywords)
-            ]
-            
-            for link in promising_links:
-                try:
-                    logger.info(f"[{scenario}] Navigating to promising link: {link}")
-                    await page.goto(link, wait_until="domcontentloaded", timeout=30000)
-                    secondary_html = await page.content()
-                    secondary_output = await analyzer.find_privacy_policy(secondary_html, link)
-                    if secondary_output.get("privacy_policy_url"):
-                        logger.info(f"[{scenario}] Found potential privacy policy at: {link}")
-                        found_policies.append(secondary_output)
-                except Exception as e:
-                    logger.warning(f"[{scenario}] Could not analyze promising link {link}: {e}")
-                    continue
-        
-        if len(found_policies) > 0:
-            llm_output = max(found_policies, key=lambda x: x.get('confidence_score', 0.0))
-            logger.info(f"[{scenario}] Selected best privacy policy with score {llm_output.get('confidence_score')}: {llm_output.get('privacy_policy_url')}")
+            if llm_output.get("privacy_policy_url"):
+                policy_url_path = llm_output.get("privacy_policy_url")
+                full_privacy_policy_url = urljoin(site_url, policy_url_path)
 
-        # --- 4. DPO & Retention Analysis (if policy found) ---
-        dpo_output = {"reasoning": "No privacy policy URL found."}
-        retention_output = {"reasoning": "No privacy policy URL found."}
-        cookie_declaration_output = {"reasoning": "No privacy policy URL found."}
-        deletion_page_output = {"reasoning": "No privacy policy URL found."}
-        full_privacy_policy_url = None
+                # Define tasks for parallel execution
+                dpo_task = asyncio.create_task(analyzer.find_dpo(
+                    browser, full_privacy_policy_url
+                ))
+                retention_task = asyncio.create_task(analyzer.analyze_retention_policy(
+                    browser, full_privacy_policy_url
+                ))
+                cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
+                    browser, full_privacy_policy_url
+                ))
+                deletion_page_task = asyncio.create_task(analyzer.find_data_deletion_page(
+                    browser, full_privacy_policy_url
+                ))
+                
+                # Run tasks and gather results
+                dpo_res, retention_res, cookie_decl_res, deletion_res = await asyncio.gather(
+                    dpo_task, retention_task, cookie_declaration_task, deletion_page_task
+                )
+                
+                # Collect results into the extensible dictionary
+                analyses_results = {
+                    "dpo": dpo_res,
+                    "retention": retention_res,
+                    "cookie_declaration": cookie_decl_res,
+                    "data_deletion": deletion_res,
+                }
 
-        if llm_output.get("privacy_policy_url"):
-            policy_url_path = llm_output.get("privacy_policy_url")
-            full_privacy_policy_url = urljoin(site_url, policy_url_path)
-            
-            # Execute DPO, retention, cookie declaration, and data deletion page analysis in parallel
-            dpo_task = asyncio.create_task(analyzer.find_dpo(
-                browser, full_privacy_policy_url, scenario
-            ))
-            
-            retention_task = asyncio.create_task(analyze_privacy_policy_page(
-                browser, analyzer, full_privacy_policy_url, scenario
-            ))
-
-            cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
-                browser, full_privacy_policy_url, scenario
-            ))
-
-            deletion_page_task = asyncio.create_task(analyzer.find_data_deletion_page(
-                browser, full_privacy_policy_url, scenario
-            ))
-            
-            dpo_output, retention_output, cookie_declaration_output, deletion_page_output = await asyncio.gather(dpo_task, retention_task, cookie_declaration_task, deletion_page_task)
-            
-        await page.close()
-        
-        full_cookie_declaration_url = None
-        if cookie_declaration_output.get("cookie_declaration_url"):
-            full_cookie_declaration_url = urljoin(full_privacy_policy_url, cookie_declaration_output.get("cookie_declaration_url"))
-
-        # --- 5. Format Success Result ---
-        return SiteAnalysisResult.from_outputs(
-            site_url=site_url,
-            scenario=scenario,
-            cookies=cookies,
-            cookie_categories=cookie_categories,
-            third_party_count=third_party_count,
-            llm_output=llm_output,
-            dpo_output=dpo_output,
-            retention_output=retention_output,
-            cookie_declaration_output=cookie_declaration_output,
-            deletion_page_output=deletion_page_output,
-            privacy_policy_url=full_privacy_policy_url,
-            simple_extractor_links=simple_links,
-            cookie_declaration_url=full_cookie_declaration_url
-        )
+            # --- 5. Format Success Result ---
+            return SiteAnalysisResult.from_outputs(
+                site_url=site_url,
+                scenario=scenario,
+                cookies=cookies,
+                cookie_categories=cookie_categories,
+                third_party_count=third_party_count,
+                llm_output=llm_output,
+                privacy_policy_url=full_privacy_policy_url,
+                simple_extractor_links=simple_links,
+                **analyses_results
+            )
 
     except Exception as e:
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
-        if page:
-            await page.close()
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
-
 
 async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser) -> List[SiteAnalysisResult]:
     """
@@ -192,8 +116,9 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
 
     for index, row in sites_df.iterrows():
         site_url = row['website_url']
-        if not site_url.startswith('http://') and not site_url.startswith('https://'):
-            site_url = 'https://' + site_url
+        parsed_url = urlparse(site_url)
+        if not parsed_url.scheme:
+            site_url = "https://" + site_url
             
         for scenario in scenarios:
             tasks.append(
