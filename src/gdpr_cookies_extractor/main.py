@@ -34,8 +34,12 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             await handle_cookie_banner(page, action=scenario)
             await page.wait_for_timeout(3000)  # Wait for actions to apply
 
+            # Get the final URL after potential redirects from navigation or cookie banners
+            current_url = page.url
+            logger.info(f"Final URL after navigation: {current_url}")
+
             cookies = await page.context.cookies()
-            logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {site_url}.")
+            logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {current_url}.")
 
             # --- 2. Cookie Analysis ---
             logger.debug(f"Cookies content: {cookies}")
@@ -44,7 +48,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             logger.debug("Categorizing cookies...")
             cookie_categories = await analyzer.categorize_cookies(simplified_cookies)
 
-            third_party_count = count_third_party_cookies(site_url, cookies)
+            third_party_count = count_third_party_cookies(current_url, cookies)
 
             # --- 3. Find Privacy Policy ---
             logger.debug("Getting page content for simple extractor...")
@@ -53,7 +57,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
 
             # This single call now handles the initial search, deep search, and finds the best policy.
-            llm_output = await analyzer.find_privacy_policy(page, site_url)
+            llm_output = await analyzer.find_privacy_policy(page)
 
             # --- 4. DPO & Retention Analysis (if policy found) ---
             analyses_results = {}
@@ -61,7 +65,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             
             if llm_output.get("privacy_policy_url"):
                 policy_url_path = llm_output.get("privacy_policy_url")
-                full_privacy_policy_url = urljoin(site_url, policy_url_path)
+                full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
                 # Define tasks for parallel execution
                 dpo_task = asyncio.create_task(analyzer.find_dpo(
@@ -92,7 +96,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
 
             # --- 5. Format Success Result ---
             return SiteAnalysisResult.from_outputs(
-                site_url=site_url,
+                site_url=current_url,
                 scenario=scenario,
                 cookies=cookies,
                 cookie_categories=cookie_categories,

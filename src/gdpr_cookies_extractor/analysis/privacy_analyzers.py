@@ -58,12 +58,15 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_privacy_policy(self, page, site_url: str) -> Dict[str, Any]:
+    async def find_privacy_policy(self, page) -> Dict[str, Any]:
         """
         Orchestrates a deep search for the privacy policy URL.
         It starts with an initial analysis of the given page and, if no policy is found,
         it searches through internal links for promising leads.
         """
+        # Get the URL directly from the page object
+        site_url = page.url
+
         # Initial search on the current page
         logger.info(f"Starting privacy policy search for {site_url}...")
         initial_html = await page.content()
