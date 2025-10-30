@@ -64,7 +64,7 @@ class PrivacyAnalyzer:
         It starts with an initial analysis of the given page and, if no policy is found,
         it searches through internal links for promising leads.
         """
-        # 1. Initial search on the current page
+        # Initial search on the current page
         logger.info(f"Starting privacy policy search for {site_url}...")
         initial_html = await page.content()
         initial_llm_output = await self._extract_policy_url_from_html(initial_html, site_url)
@@ -73,7 +73,7 @@ class PrivacyAnalyzer:
         if initial_llm_output.get("privacy_policy_url"):
             found_policies.append(initial_llm_output)
 
-        # 2. If the initial search didn't find a URL, search internal links
+        # If the initial search didn't find a URL, search internal links
         if not initial_llm_output.get("privacy_policy_url"):
             logger.info("Privacy policy not found on main page. Searching internal links...")
             internal_links = await self._get_internal_links(page, site_url)
@@ -97,7 +97,7 @@ class PrivacyAnalyzer:
                     logger.warning(f"Could not analyze promising link {link}: {e}")
                     continue
 
-        # 3. If we found any policies, select the one with the highest confidence score
+        # If we found any policies, select the one with the highest confidence score
         if len(found_policies) > 0:
             best_policy = max(found_policies, key=lambda x: x.get('confidence_score', 0.0))
             logger.info(f"Selected best privacy policy with score {best_policy.get('confidence_score')}: {best_policy.get('privacy_policy_url')}")
@@ -114,36 +114,55 @@ class PrivacyAnalyzer:
         """
         cookies_json_list = json.dumps(cookies_data, indent=2)
         prompt = f"""
-        You are a JSON generator. Your only function is to categorize the provided list of cookies into a JSON object.
+        You are an expert in GDPR compliance and a JSON-only generator.
+        Your task is to categorize a list of cookies and provide a brief description for each, based on your general knowledge.
 
-        **Input:** A JSON list of cookie objects.
-        **Output:** A single JSON object.
+        INPUT: A JSON list of raw cookie objects.
+        OUTPUT: A single JSON object, with no other text.
 
-        **Instructions:**
-        1.  You will be given a JSON list of cookies.
-        2.  You MUST categorize every single cookie from the input list.
-        3.  The output MUST be a single JSON object.
-        4.  The JSON object must have a single root key named "cookie_categories".
-        5.  The value of "cookie_categories" must be a list of JSON objects.
-        6.  Each object in the list represents a category and MUST have the following two keys:
-            - "category_name": A string with the name of the category (e.g., "Strictly Necessary", "Functional", "Analytical", "Marketing", "Uncategorized").
-            - "cookies": A list of the input cookies with name and if possible a description of what does the specific cookie.
+        CATEGORIES DEFINITIONS:
+        - "Strictly Necessary": Essential for website function (e..g, session, security, shopping cart).
+        - "Functional": Remembers user choices (e.g., language, preferences).
+        - "Analytical": Collects data on user behavior (e.g., Google Analytics).
+        - "Marketing": Tracks users for advertising.
+        - "Uncategorized": Unknown or generic purpose.
 
-        **Do NOT include any text, explanation, or markdown before or after the JSON object.**
+        INSTRUCTIONS:
+        1.  Analyze each cookie in the "Input Cookies" list.
+        2.  Based on the cookie's "name" and "domain", categorize it into one of the five categories defined above.
+        3.  Create a "description" for each cookie based on your general knowledge (e.g., a cookie named "_ga" is for Google Analytics).
+        4.  CRITICAL RULE: If a cookie's name is generic or unknown (e.g., "uid", "session_token"), you MUST set its description to "No specific description available." Do NOT invent a purpose.
+        5.  Return a single JSON object with the root key "cookie_categories".
+        6.  The value of "cookie_categories" must be a list of objects (one for each category that contains cookies).
+        7.  Each category object must contain:
+            - "category_name": The name of the category.
+            - "cookies": A list of objects for the cookies in that category.
+        8.  Each cookie object in the *output* "cookies" list MUST have this structure:
+            - "name": The original cookie name.
+            - "domain": The original cookie domain.
+            - "description": Your generated description (or "No specific description available.").
 
-        **Example of the required output format:**
+        DO NOT include any text, explanation, or markdown before or after the JSON object.
+
+        EXAMPLE OF REQUIRED OUTPUT FORMAT:
         {{{{
           "cookie_categories": [
             {{
-              "category_name": "Functional",
+              "category_name": "Strictly Necessary",
               "cookies": [
-                {{ "name": "name of the cookie", "description": "brief description of what the cookies is used for",  "domain": "domain of the site" }}
+                {{ "name": "sessionid", "domain": "example.com", "description": "No specific description available." }}
+              ]
+            }},
+            {{
+              "category_name": "Analytical",
+              "cookies": [
+                {{ "name": "_ga", "domain": ".example.com", "description": "Google Analytics cookie used to distinguish users." }}
               ]
             }}
           ]
         }}}}
 
-        **Input Cookies to categorize:**
+        INPUT COOKIES TO CATEGORIZE:
         {cookies_json_list}
         """
         
@@ -151,7 +170,7 @@ class PrivacyAnalyzer:
         
         if not response.success:
             logger.error(f"Cookie categorization failed: {response.error}")
-            return {{}} # Return empty dict on failure
+            return {{}}
             
         return response.data
 
@@ -160,29 +179,37 @@ class PrivacyAnalyzer:
         Analyzes the HTML of a given page to find the cookie declaration page URL.
         """
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the URL of the cookie declaration or cookie settings page for the given website.
-        This URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
-        This page is often linked from the privacy policy or a cookie banner.
-        Analyze the provided HTML content and find the most likely URL for the cookie declaration page.
-        Look for links containing keywords like 'cookie', 'technologies', or 'cookie and other technologies'.
-        Examples of INVALID URLs: /static/js/cookie-script.js, /assets/css/styles.css, /images/cookie-icon.png
+        You are an expert web analysis agent. Your task is to find the URL of the **human-readable** cookie declaration or cookie settings page.
+
+        CRITICAL RULES:
+        1.  MUST BE A NAVIGABLE PAGE: The URL must point to an informational HTML page an end-user can read.
+        2.  MUST NOT BE AN ASSET: The URL must NOT be a script (.js), stylesheet (.css), image (.png, .svg), or internal HTML fragment (like 'cookies.built.html' or 'cookie-fragment.html').
         
+        SEARCH STRATEGY:
+        1.  Analyze the provided HTML for links (`<a>` tags).
+        2.  Give priority to links where the *clickable text* (anchor text) contains keywords like 'Cookie Policy', 'Manage Cookies', 'Cookie Settings', 'Cookies and Technologies'.
+        3.  If no clear anchor text is found, look at the link's 'href' attribute for keywords like 'cookie', 'technologies', 'privacy'.
+
         The HTML content to analyze is below:
         ---
         {html_content}
         ---
         
-        The URL of the page is: {url}
+        The base URL of the page is: {url}
 
         You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
         Return your answer as a single JSON object with the following structure:
         {{
-          "cookie_declaration_url": <string>,
+          "cookie_declaration_url": <string> or null,
           "reasoning": <string>,
           "confidence_score": <number>
         }}
-        cookie_declaration_url must be a full URL not a sub path. If no URL is found, set "cookie_declaration_url" to null.
 
+        INSTRUCTIONS FOR JSON FIELDS:
+        - "cookie_declaration_url": The full, absolute URL to the page. If you find a relative path (e.g., "/legal/cookies"), you MUST combine it with the base URL ("{url}") to create a full URL.
+        - "reasoning": Briefly explain which keywords (in the link text or URL) led you to this choice.
+        - "confidence_score": From 0.0 to 1.0, how certain you are.
+        - If no valid URL is found, set "cookie_declaration_url" to null.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -215,7 +242,7 @@ class PrivacyAnalyzer:
         """
         page = None
         try:
-            # 1. Initial search on the current page
+            # Initial search on the current page
             logger.info(f"Starting cookie declaration search for {site_url}...")
             page = await browser.new_page()
             await page.goto(site_url, timeout=60000)
@@ -226,7 +253,7 @@ class PrivacyAnalyzer:
             if initial_llm_output.get("cookie_declaration_url"):
                 found_declarations.append(initial_llm_output)
 
-            # 2. If the initial search didn't find a URL, search internal links
+            # If the initial search didn't find a URL, search internal links
             if not initial_llm_output.get("cookie_declaration_url"):
                 logger.info("Cookie declaration not found on main page. Searching internal links...")
                 internal_links = await self._get_internal_links(page, site_url)
@@ -250,7 +277,7 @@ class PrivacyAnalyzer:
                         logger.warning(f"Could not analyze promising link {link}: {e}")
                         continue
 
-            # 3. If we found any declarations, select the one with the highest confidence score
+            # If we found any declarations, select the one with the highest confidence score
             if len(found_declarations) > 0:
                 best_declaration = max(found_declarations, key=lambda x: x.get('confidence_score', 0.0))
                 logger.info(
@@ -275,10 +302,14 @@ class PrivacyAnalyzer:
         Analyzes the HTML of a privacy policy page to find data retention information.
         """
         prompt = f"""
-        You are an expert in GDPR compliance. Your task is to find and summarize the data retention policy in the provided privacy policy HTML.
-        Look for keywords and phrases related to data retention, such as "data retention", "how long we keep your data", "storage period", or "period for which data is stored".
-        Extract and summarize the key information about how long personal data is kept and any conditions for its retention.
-        
+        You are an expert in GDPR compliance and a meticulous text extractor.
+        Your task is to find and summarize the data retention policy from the provided HTML.
+
+        CRITICAL RULES:
+        1.  NO HALLUCINATIONS: You MUST NOT invent information. Your summary must be 100% based *only* on the text found. If the text is vague (e.g., "as long as necessary"), your summary MUST be vague. Do not add specific details (like "12 months") if they are not explicitly written.
+        2.  STRICT EXTRACTION: Your primary goal is to find the *exact* text.
+        3.  SECTION IDENTIFICATION: You must identify the heading or title of the section where you found the information (e.g., "Retention of Personal Data").
+
         The URL of the page being analyzed is: {url}
 
         Privacy Policy HTML content:
@@ -289,15 +320,20 @@ class PrivacyAnalyzer:
         You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
         Return your answer as a single JSON object with the following structure:
         {{
-          "retention_policy_summary": <string>, 
-          "retention_policy_url": <string>,
+          "retention_policy_summary": <string> or null,
+          "source_section": <string> or null,
           "reasoning": <string>,
           "confidence_score": <number>,
-          "source_url": "{url}"
+          "retention_policy_url": "{url}"
         }}
-        If no retention policy is found, set "retention_policy_summary" to null.
-        In the reasoning field explain what words or other hints have you had to generate the retention_policy_summary field or why you didn't succeed.  
-        In confidence_score field tell me from 0 to 1 how sure you are that the retention_policy_summary contains the correct information requested. 
+
+        INSTRUCTIONS FOR JSON FIELDS:
+        - "retention_policy_summary": A brief summary of the policy.".
+        - "source_section": The *exact* text of the nearest section heading (e.g., "Data Retention", "How We Keep Your Data").
+        - "reasoning": Briefly explain *why* you chose this section and text.
+        - "confidence_score": From 0.0 to 1.0, how certain you are.
+        
+        If no retention policy is found, set "retention_policy_summary" and "source_section" to null.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
