@@ -3,6 +3,7 @@ import json
 import asyncio
 import sys
 import logging
+import re
 from playwright.async_api import async_playwright
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
@@ -21,6 +22,38 @@ from .analysis.models import SiteAnalysisResult
 logger = logging.getLogger(__name__)
 
 
+def sanitize_filename(url: str) -> str:
+    """Sanitizes a URL to be used as a valid filename."""
+    parsed_url = urlparse(url)
+    # Replace invalid characters with an underscore
+    sanitized = re.sub(r'[\/*?:"<>|]', "_", parsed_url.netloc)
+    return sanitized
+
+
+async def dump_data(current_url: str, scenario: str, cookies: list, browser, full_privacy_policy_url: Optional[str]):
+    """Dumps cookies to a JSON file and the privacy policy to an HTML file."""
+    sanitized_url = sanitize_filename(current_url)
+    
+    # Dump cookies
+    cookie_dump_path = f"output/dumps/{sanitized_url}_{scenario}_cookies.json"
+    with open(cookie_dump_path, "w") as f:
+        json.dump(cookies, f, indent=4)
+    logger.info(f"Dumped {len(cookies)} cookies to {cookie_dump_path}")
+
+    # Dump privacy policy
+    if full_privacy_policy_url:
+        try:
+            async with await browser.new_page() as policy_page:
+                await policy_page.goto(full_privacy_policy_url, wait_until="domcontentloaded", timeout=60000)
+                policy_html = await policy_page.content()
+                policy_dump_path = f"output/dumps/{sanitized_url}_{scenario}_privacy_policy.html"
+                with open(policy_dump_path, "w", encoding="utf-8") as f:
+                    f.write(policy_html)
+                logger.info(f"Dumped privacy policy to {policy_dump_path}")
+        except Exception as e:
+            logger.error(f"Failed to dump privacy policy for {full_privacy_policy_url}: {e}")
+
+
 async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
@@ -32,7 +65,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             # --- 1. Navigation and Cookie Handling ---
             await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
             await handle_cookie_banner(page, action=scenario)
-            await page.wait_for_timeout(3000)  # Wait for actions to apply
+            await page.wait_for_timeout(3000)  # Give the page time to process the click
 
             # Get the final URL after potential redirects from navigation or cookie banners
             current_url = page.url
@@ -67,6 +100,11 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 policy_url_path = llm_output.get("privacy_policy_url")
                 full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
+            # --- DUMP DATA ---
+            await dump_data(current_url, scenario, cookies, browser, full_privacy_policy_url)
+            # --- END DUMP ---
+
+            if full_privacy_policy_url:
                 # Define tasks for parallel execution
                 # dpo_task = asyncio.create_task(analyzer.find_dpo(
                 #     browser, full_privacy_policy_url
