@@ -68,30 +68,33 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
                 # Define tasks for parallel execution
-                dpo_task = asyncio.create_task(analyzer.find_dpo(
-                    browser, full_privacy_policy_url
-                ))
-                retention_task = asyncio.create_task(analyzer.analyze_retention_policy(
-                    browser, full_privacy_policy_url
-                ))
-                cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
-                    browser, full_privacy_policy_url
-                ))
-                deletion_page_task = asyncio.create_task(analyzer.find_data_deletion_page(
-                    browser, full_privacy_policy_url
-                ))
+                # dpo_task = asyncio.create_task(analyzer.find_dpo(
+                #     browser, full_privacy_policy_url
+                # ))
+                # retention_task = asyncio.create_task(analyzer.analyze_retention_policy(
+                #     browser, full_privacy_policy_url
+                # ))
+                # cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
+                #     browser, full_privacy_policy_url
+                # ))
+                # deletion_page_task = asyncio.create_task(analyzer.find_data_deletion_page(
+                #     browser, full_privacy_policy_url
+                # ))
                 
                 # Run tasks and gather results
-                dpo_res, retention_res, cookie_decl_res, deletion_res = await asyncio.gather(
-                    dpo_task, retention_task, cookie_declaration_task, deletion_page_task
-                )
+                # deletion_res  = await asyncio.gather(
+                #     deletion_page_task 
+                # )
+                # cookie_decl_res, deletion_res, retention_res, dpo_res  = await asyncio.gather(
+                #     cookie_declaration_task, deletion_page_task retention_task, dpo_task, 
+                # )
                 
                 # Collect results into the extensible dictionary
                 analyses_results = {
-                    "dpo": dpo_res,
-                    "retention": retention_res,
-                    "cookie_declaration": cookie_decl_res,
-                    "data_deletion": deletion_res,
+                    # "cookie_declaration": cookie_decl_res,
+                    # "data_deletion": deletion_res,
+                    # "retention": retention_res,
+                    # "dpo": dpo_res,
                 }
 
             # --- 5. Format Success Result ---
@@ -116,7 +119,8 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
     Creates and runs all analysis tasks concurrently.
     """
     tasks = []
-    scenarios = ["accept", "reject"]
+    # scenarios = ["accept", "reject"]
+    scenarios = ["accept"]
 
     for index, row in sites_df.iterrows():
         site_url = row['website_url']

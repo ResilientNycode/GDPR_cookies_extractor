@@ -332,7 +332,7 @@ class PrivacyAnalyzer:
 
         INSTRUCTIONS FOR JSON FIELDS:
         - "retention_policy_summary": A brief summary of the policy.".
-        - "source_section": The *exact* text of the nearest section heading (e.g., "Data Retention", "How We Keep Your Data").
+        - "source_section": The exact text of the nearest section heading (e.g., "Data Retention", "How We Keep Your Data").
         - "reasoning": Briefly explain *why* you chose this section and text.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
         
@@ -380,18 +380,22 @@ class PrivacyAnalyzer:
         dedicated to managing or deleting personal data.
         """
         prompt = f"""
-        You are an expert in GDPR and web analysis. Your task is to find the link (URL) to the specific page where a user can manage, access, or delete their personal data.
-        This URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
+        YYou are an expert in GDPR and web analysis. Your task is to find the single, primary link (URL) where a user can centrally manage or delete their personal data.
 
-        Analyze the provided HTML and search for the most likely link. 
-        Look for keywords such as:
-        - "delete your data"
-        - "close your account"
-        - "how to access and control your personal data"
+        This MUST be the main "Privacy Dashboard" or "Account Deletion" page.
+
+        You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing. These are NOT the correct page.
+
+        Analyze the provided HTML and search for links containing these specific high-priority keywords:
         - "privacy dashboard"
-        - "data subject rights"
-        - "right to erasure"
+        - "manage your personal data"
+        - "how to access and control your personal data"
+        - "Access and clear... data"
         - "manage your data"
+        - "close your account"
+        - "delete your data"
+
+        This URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
         Examples of INVALID URLs: /static/js/delete-script.js, /assets/css/styles.css, /images/delete-icon.png
 
         The URL of the page being analyzed is: {url}
@@ -400,19 +404,21 @@ class PrivacyAnalyzer:
         ---
         {html_content}
         ---
-        
+
         You MUST return a single JSON object and nothing else. Do not include any text or explanation.
         Return your answer as a single JSON object with this structure:
         {{
-          "deletion_page_url": <string> or null,
-          "reasoning": <string>,
-          "confidence_score": <number>,
-          "source_url": "{url}"
+        "deletion_page_url": <string> or null,
+        "reasoning": <string>,
+        "confidence_score": <number>,
+        "source_section": <string> or null,
+        "source_url": "{url}"
         }}
 
         - "deletion_page_url": The full URL that leads to the data management/deletion page.
         - "reasoning": Briefly explain what keywords or hints led you to that URL.
-        - "confidence_score": A score from 0.0 to 1.0 on your certainty.
+        - "confidence_score": A score from 0.0 to 1.0 on your certainty in this being the primary management page.
+        - "source_section": The anchor text (the clickable text) of the link you found. If the anchor text is generic (e.g., "click here"), use the text of the nearest heading (like `<h2>`, `<h3>`) above the link instead.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -475,8 +481,8 @@ class PrivacyAnalyzer:
                 internal_links = await self._get_internal_links(page, site_url)
                 
                 promising_keywords = [
-                    'privacy', 'account', 'delete', 'erasure', 'rights', 
-                    'manage', 'control', 'dashboard', 'data'
+                    'delete', 'erasure', 'clear' 
+                    'manage', 'control', 'dashboard'
                 ]
                 promising_links = [
                     link for link in internal_links 
