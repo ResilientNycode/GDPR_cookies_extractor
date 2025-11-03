@@ -15,8 +15,8 @@ class SiteAnalysisResult:
     # Cookie Info
     cookies_count: int = 0
     third_party_cookies_count: int = 0
-    raw_cookies_data: str = "[]"
-    categorized_cookies: str = "{}"
+    raw_cookies_data: List[Dict[str, Any]] = field(default_factory=list)
+    categorized_cookies: List[Dict[str, Any]] = field(default_factory=list)
     
     # Extensible dictionary for all sub-analyses
     analyses: Dict[str, Dict[str, Any]] = field(default_factory=dict)
@@ -29,7 +29,7 @@ class SiteAnalysisResult:
         site_url: str,
         scenario: str,
         cookies: list,
-        cookie_categories: dict,
+        cookie_categories: Dict[str, List[Dict[str, Any]]],
         third_party_count: int,
         llm_output: dict,
         privacy_policy_url: Optional[str] = None,
@@ -44,8 +44,8 @@ class SiteAnalysisResult:
             llm_reasoning=llm_output.get("reasoning"),
             cookies_count=len(cookies),
             third_party_cookies_count=third_party_count,
-            raw_cookies_data=json.dumps(cookies),
-            categorized_cookies=json.dumps(cookie_categories),
+            raw_cookies_data=cookies,
+            categorized_cookies=cookie_categories.get("cookie_categories", []),
             simple_extractor_links=simple_extractor_links,
             analyses=analyses
         )
