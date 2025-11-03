@@ -4,6 +4,7 @@ import asyncio
 import sys
 import logging
 import re
+import os
 from playwright.async_api import async_playwright
 from datetime import datetime
 from urllib.parse import urlparse, urljoin
@@ -30,12 +31,14 @@ def sanitize_filename(url: str) -> str:
     return sanitized
 
 
-async def dump_data(current_url: str, scenario: str, cookies: list, browser, full_privacy_policy_url: Optional[str]):
+async def dump_data(current_url: str, scenario: str, cookies: list, browser, full_privacy_policy_url: Optional[str], timestamp: str):
     """Dumps cookies to a JSON file and the privacy policy to an HTML file."""
     sanitized_url = sanitize_filename(current_url)
+    dump_dir = f"output/dumps/analysis_results_{timestamp}"
+    os.makedirs(dump_dir, exist_ok=True)
     
     # Dump cookies
-    cookie_dump_path = f"output/dumps/{sanitized_url}_{scenario}_cookies.json"
+    cookie_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_cookies.json"
     with open(cookie_dump_path, "w") as f:
         json.dump(cookies, f, indent=4)
     logger.info(f"Dumped {len(cookies)} cookies to {cookie_dump_path}")
@@ -46,7 +49,7 @@ async def dump_data(current_url: str, scenario: str, cookies: list, browser, ful
             async with await browser.new_page() as policy_page:
                 await policy_page.goto(full_privacy_policy_url, wait_until="domcontentloaded", timeout=60000)
                 policy_html = await policy_page.content()
-                policy_dump_path = f"output/dumps/{sanitized_url}_{scenario}_privacy_policy.html"
+                policy_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_privacy_policy.html"
                 with open(policy_dump_path, "w", encoding="utf-8") as f:
                     f.write(policy_html)
                 logger.info(f"Dumped privacy policy to {policy_dump_path}")
@@ -54,7 +57,7 @@ async def dump_data(current_url: str, scenario: str, cookies: list, browser, ful
             logger.error(f"Failed to dump privacy policy for {full_privacy_policy_url}: {e}")
 
 
-async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str) -> SiteAnalysisResult:
+async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
     Returns a SiteAnalysisResult object.
@@ -101,7 +104,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
             # --- DUMP DATA ---
-            await dump_data(current_url, scenario, cookies, browser, full_privacy_policy_url)
+            await dump_data(current_url, scenario, cookies, browser, full_privacy_policy_url, timestamp)
             # --- END DUMP ---
 
             if full_privacy_policy_url:
@@ -152,7 +155,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
 
-async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser) -> List[SiteAnalysisResult]:
+async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser, timestamp: str) -> List[SiteAnalysisResult]:
     """
     Creates and runs all analysis tasks concurrently.
     """
@@ -168,23 +171,31 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
             
         for scenario in scenarios:
             tasks.append(
-                process_site_scenario(browser, analyzer, site_url, scenario)
+                process_site_scenario(browser, analyzer, site_url, scenario, timestamp)
             )
     
     results = await asyncio.gather(*tasks)
     return results
 
 
-def save_results(results: List[SiteAnalysisResult]):
+def save_results(results: List[SiteAnalysisResult], timestamp: str):
     """
     Saves the list of result dataclasses to a timestamped JSON file.
     """
     results_dicts = [asdict(result) for result in results]
     results_df = pd.DataFrame(results_dicts)
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     filename = f"output/analysis_results_{timestamp}.json"
     results_df.to_json(filename, orient="records", indent=4)
     logger.info(f"Analysis complete. Results saved to {filename}")
+
+
+def create_output_directories():
+    """
+    Creates the necessary output directories if they don't already exist.
+    """
+    os.makedirs("output", exist_ok=True)
+    os.makedirs("output/dumps", exist_ok=True)
+    logger.info("Ensured output directories exist.")
 
 
 def load_llm_config():
@@ -219,6 +230,7 @@ async def gdpr_analysis(sites_df):
     """
     llm_config = load_llm_config()
     scraper_config = load_scraper_config()
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
     llm_provider = OllamaProvider(model=llm_config.get('model', 'llama3'))
     analyzer = PrivacyAnalyzer(
@@ -230,16 +242,18 @@ async def gdpr_analysis(sites_df):
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         
-        all_results = await run_all_analyses(sites_df, analyzer, browser)
+        all_results = await run_all_analyses(sites_df, analyzer, browser, timestamp)
         
         await browser.close()
     
-    save_results(all_results)
+    save_results(all_results, timestamp)
 
 
 def main():
     setup_logging()
     logger.info("Starting GDPR Cookie Analysis...")
+
+    create_output_directories()
 
     if len(sys.argv) > 1:
         site_url_from_cli = sys.argv[1]
