@@ -1,20 +1,26 @@
 # GDPR_cookies_extractor
 
-## Commands
+## Local
 
 poetry run main https://www.apple.com/
 
 ## Docker
 
-sudo docker run -it \
+### Enable current user to run Docker (avoiding root permissions)
+
+sudo usermod -aG docker $USER
+
+### Run
+
+docker run -it \
  -v ./output:/app/output \
  -v ./logs:/app/logs \
  gdpr_extractor \
  poetry run main microsoft.com
 
-## Docker with GPU
+### Run with GPU
 
-sudo docker run --gpus all -it \
+docker run --gpus all -it \
  -v ./output:/app/output \
  -v ./logs:/app/logs \
  gdpr_extractor \

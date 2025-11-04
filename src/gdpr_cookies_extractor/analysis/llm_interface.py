@@ -64,6 +64,5 @@ class AbstractLLMClient(ABC):
             json_string = raw_content[start_index:end_index]
         
         # Remove invalid control characters from JSON string
-        # This regex matches control characters (U+0000 to U+001F) excluding tab (U+0009), newline (U+000A), and carriage return (U+000D)
         json_string = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', '', json_string)
         return json_string

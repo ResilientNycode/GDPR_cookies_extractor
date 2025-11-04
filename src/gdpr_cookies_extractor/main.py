@@ -26,7 +26,7 @@ logger = logging.getLogger(__name__)
 def sanitize_filename(url: str) -> str:
     """Sanitizes a URL to be used as a valid filename."""
     parsed_url = urlparse(url)
-    # Replace invalid characters with an underscore
+    
     sanitized = re.sub(r'[\/*?:"<>|]', "_", parsed_url.netloc)
     return sanitized
 
@@ -65,7 +65,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
     logger.info(f"Processing: {site_url} (Scenario: {scenario})")
     try:
         async with await browser.new_page() as page:
-            # --- 1. Navigation and Cookie Handling ---
+            # Navigation and Cookie Handling ---
             await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
             await handle_cookie_banner(page, action=scenario)
             await page.wait_for_timeout(3000)  # Give the page time to process the click
@@ -77,7 +77,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             cookies = await page.context.cookies()
             logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {current_url}.")
 
-            # --- 2. Cookie Analysis ---
+            # Cookie Analysis ---
             logger.debug(f"Cookies content: {cookies}")
             simplified_cookies = simplify_cookies(cookies)
 
@@ -86,16 +86,15 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
 
             third_party_count = count_third_party_cookies(current_url, cookies)
 
-            # --- 3. Find Privacy Policy ---
+            # Find Privacy Policy ---
             logger.debug("Getting page content for simple extractor...")
             html_content = await page.content()
             simple_links = simple_extractor(html_content)
             logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
 
-            # This single call now handles the initial search, deep search, and finds the best policy.
             llm_output = await analyzer.find_privacy_policy(page)
 
-            # --- 4. DPO & Retention Analysis (if policy found) ---
+            # DPO & Retention Analysis (if policy found) ---
             analyses_results = {}
             full_privacy_policy_url = None
             
@@ -103,9 +102,8 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 policy_url_path = llm_output.get("privacy_policy_url")
                 full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
-            # --- DUMP DATA ---
             await dump_data(current_url, scenario, cookies, browser, full_privacy_policy_url, timestamp)
-            # --- END DUMP ---
+            
 
             if full_privacy_policy_url:
                 # Define tasks for parallel execution
@@ -138,7 +136,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                     # "dpo": dpo_res,
                 }
 
-            # --- 5. Format Success Result ---
+            # Format Success Result ---
             return SiteAnalysisResult.from_outputs(
                 site_url=current_url,
                 scenario=scenario,

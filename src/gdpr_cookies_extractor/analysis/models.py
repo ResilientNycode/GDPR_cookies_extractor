@@ -10,7 +10,7 @@ class SiteAnalysisResult:
     
     # High-level results
     privacy_policy_url: Optional[str] = None
-    llm_reasoning: Optional[str] = None # Reasoning for the main policy finding
+    llm_reasoning: Optional[str] = None 
     
     # Cookie Info
     cookies_count: int = 0
