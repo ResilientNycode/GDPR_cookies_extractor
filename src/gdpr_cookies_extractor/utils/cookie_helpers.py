@@ -12,7 +12,6 @@ def simplify_cookies(cookies: List[Dict[str, Any]]) -> List[Dict[str, str]]:
     logger.debug("Simplifying cookies...")
     simplified_cookies = []
     for c in cookies:
-        logger.debug(f"Processing cookie: {c}")
         simplified_cookies.append({"name": c.get("name"), "domain": c.get("domain")})
     logger.debug(f"Cookies simplified. Found {len(simplified_cookies)} cookies.")
     return simplified_cookies
