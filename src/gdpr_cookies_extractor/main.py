@@ -181,6 +181,7 @@ def save_results(results: List[SiteAnalysisResult], timestamp: str):
     Saves the list of result dataclasses to a timestamped JSON file.
     """
     results_dicts = [asdict(result) for result in results]
+    logger.debug(f"Data to be serialized: {results_dicts}") 
     filename = f"output/analysis_results_{timestamp}.json"
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(results_dicts, f, indent=4, ensure_ascii=False)
