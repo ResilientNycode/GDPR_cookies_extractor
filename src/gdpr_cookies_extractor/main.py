@@ -181,9 +181,9 @@ def save_results(results: List[SiteAnalysisResult], timestamp: str):
     Saves the list of result dataclasses to a timestamped JSON file.
     """
     results_dicts = [asdict(result) for result in results]
-    results_df = pd.DataFrame(results_dicts)
     filename = f"output/analysis_results_{timestamp}.json"
-    results_df.to_json(filename, orient="records", indent=4)
+    with open(filename, 'w', encoding='utf-8') as f:
+        json.dump(results_dicts, f, indent=4, ensure_ascii=False)
     logger.info(f"Analysis complete. Results saved to {filename}")
 
 
