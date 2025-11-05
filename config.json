@@ -22,5 +22,19 @@
         "role=button[name='Deny']"
       ]
     }
+  },
+  "search_keywords": {
+    "privacy_policy": [
+      "privacy",
+      "legal",
+      "terms",
+      "imprint",
+      "about",
+      "contact",
+      "privacy statement"
+    ],
+    "cookie_declaration": ["cookie", "technologies", "imprint"],
+    "data_deletion": ["delete", "erasure", "clear", "manage", "", "dashboard"],
+    "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
   }
 }

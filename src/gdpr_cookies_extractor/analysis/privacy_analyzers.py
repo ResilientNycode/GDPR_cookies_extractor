@@ -58,7 +58,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def _analyze_policy_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
+    async def _analyze_policy_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for the privacy policy URL during fan-out search.
         """
@@ -67,6 +67,16 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
             policy_output = await self._extract_policy_url_from_html(html, url)
+
+            # Calculate keyword bonus
+            keyword_bonus = 0.0
+            if user_keywords and policy_output.get("privacy_policy_url"):
+                html_lower = html.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {url}, applying bonus.")
+                    keyword_bonus = 0.3 # Assign a fixed bonus
+            
+            policy_output['keyword_bonus'] = keyword_bonus
             return policy_output
         except Exception as e:
             logger.error(f"Error analyzing privacy policy sub-page {url}: {e}")
@@ -74,7 +84,7 @@ class PrivacyAnalyzer:
         finally:
             await page.close()
 
-    async def find_privacy_policy(self, browser, site_url: str) -> Dict[str, Any]:
+    async def find_privacy_policy(self, browser, site_url: str, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Orchestrates a deep search for the privacy policy URL using a parallel fan-out strategy.
         """
@@ -85,6 +95,15 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             initial_html = await page.content()
             initial_llm_output = await self._extract_policy_url_from_html(initial_html, site_url)
+
+            # Calculate keyword bonus for initial page
+            keyword_bonus = 0.0
+            if user_keywords and initial_llm_output.get("privacy_policy_url"):
+                html_lower = initial_html.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {site_url}, applying bonus.")
+                    keyword_bonus = 0.3
+            initial_llm_output['keyword_bonus'] = keyword_bonus
 
             found_policies = []
             if initial_llm_output.get("privacy_policy_url"):
@@ -107,7 +126,7 @@ class PrivacyAnalyzer:
                         break
                     
                     task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_policy_sub_page_for_fan_out(task_page, link, i + 1))
+                    task = asyncio.create_task(self._analyze_policy_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
                     search_tasks.append(task)
                 
                 if search_tasks:
@@ -115,8 +134,15 @@ class PrivacyAnalyzer:
                     found_policies.extend([p for p in found_from_fan_out if p and p.get("privacy_policy_url")])
 
             if found_policies:
-                best_policy = max(found_policies, key=lambda x: x.get('confidence_score', 0.0))
-                logger.info(f"Selected best privacy policy with score {best_policy.get('confidence_score')}: {best_policy.get('privacy_policy_url')}")
+                def calculate_hybrid_score(policy):
+                    confidence = policy.get('confidence_score', 0.0)
+                    bonus = policy.get('keyword_bonus', 0.0)
+                    # Score is 70% confidence, 30% bonus
+                    return (0.7 * confidence) + (0.3 * bonus)
+
+                best_policy = max(found_policies, key=calculate_hybrid_score)
+                hybrid_score = calculate_hybrid_score(best_policy)
+                logger.info(f"Selected best privacy policy with hybrid score {hybrid_score:.2f}: {best_policy.get('privacy_policy_url')}")
                 return best_policy
 
             logger.info("No privacy policy found after deep search.")
@@ -257,7 +283,7 @@ class PrivacyAnalyzer:
 
         return response.data
 
-    async def _analyze_cookie_declaration_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
+    async def _analyze_cookie_declaration_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for the cookie declaration URL during fan-out search.
         """
@@ -266,6 +292,16 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
             cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url)
+
+            # Calculate keyword bonus
+            keyword_bonus = 0.0
+            if user_keywords and cookie_decl_output.get("cookie_declaration_url"):
+                html_lower = html.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {url}, applying bonus.")
+                    keyword_bonus = 0.3 # Assign a fixed bonus
+            
+            cookie_decl_output['keyword_bonus'] = keyword_bonus
             return cookie_decl_output
         except Exception as e:
             logger.error(f"Error analyzing cookie declaration sub-page {url}: {e}")
@@ -273,7 +309,7 @@ class PrivacyAnalyzer:
         finally:
             await page.close()
 
-    async def find_cookie_declaration_page(self, browser, site_url: str) -> Dict[str, Any]:
+    async def find_cookie_declaration_page(self, browser, site_url: str, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Orchestrates a deep search for the cookie declaration URL using a parallel fan-out strategy.
         """
@@ -284,6 +320,15 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             initial_html = await page.content()
             initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url)
+
+            # Calculate keyword bonus for initial page
+            keyword_bonus = 0.0
+            if user_keywords and initial_llm_output.get("cookie_declaration_url"):
+                html_lower = initial_html.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {site_url}, applying bonus.")
+                    keyword_bonus = 0.3
+            initial_llm_output['keyword_bonus'] = keyword_bonus
 
             found_declarations = []
             if initial_llm_output.get("cookie_declaration_url"):
@@ -306,7 +351,7 @@ class PrivacyAnalyzer:
                         break
                     
                     task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1))
+                    task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
                     search_tasks.append(task)
 
                 if search_tasks:
@@ -314,9 +359,16 @@ class PrivacyAnalyzer:
                     found_declarations.extend([p for p in found_from_fan_out if p and p.get("cookie_declaration_url")])
 
             if found_declarations:
-                best_declaration = max(found_declarations, key=lambda x: x.get('confidence_score', 0.0))
+                def calculate_hybrid_score(declaration):
+                    confidence = declaration.get('confidence_score', 0.0)
+                    bonus = declaration.get('keyword_bonus', 0.0)
+                    # Score is 70% confidence, 30% bonus
+                    return (0.7 * confidence) + (0.3 * bonus)
+
+                best_declaration = max(found_declarations, key=calculate_hybrid_score)
+                hybrid_score = calculate_hybrid_score(best_declaration)
                 logger.info(
-                    f"Selected best cookie declaration with score {best_declaration.get('confidence_score')}: {best_declaration.get('cookie_declaration_url')}")
+                    f"Selected best cookie declaration with hybrid score {hybrid_score:.2f}: {best_declaration.get('cookie_declaration_url')}")
                 await page.close()
                 return best_declaration
 
@@ -471,7 +523,7 @@ class PrivacyAnalyzer:
 
         return response.data
 
-    async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
+    async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for the data deletion URL during fan-out search.
         """
@@ -480,6 +532,16 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
             deletion_output = await self.extract_data_deletion_url_from_page(html, url)
+
+            # Calculate keyword bonus
+            keyword_bonus = 0.0
+            if user_keywords and deletion_output.get("deletion_page_url"):
+                html_lower = html.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {url}, applying bonus.")
+                    keyword_bonus = 0.3 # Assign a fixed bonus
+            
+            deletion_output['keyword_bonus'] = keyword_bonus
             return deletion_output
         except Exception as e:
             logger.error(f"Error analyzing data deletion sub-page {url}: {e}")
@@ -487,7 +549,7 @@ class PrivacyAnalyzer:
         finally:
             await page.close()
 
-    async def find_data_deletion_page(self, browser, site_url: str) -> Dict[str, Any]:
+    async def find_data_deletion_page(self, browser, site_url: str, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Navigates the site to find the data deletion/management page (e.g., Privacy Dashboard).
         'site_url' should be the URL of the main privacy policy page.
@@ -500,20 +562,28 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             html_content = await page.content()
             initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url)
-            
-            final_output = {}
 
+            # Calculate keyword bonus for initial page
+            keyword_bonus = 0.0
+            if user_keywords and initial_output.get("deletion_page_url"):
+                html_lower = html_content.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {site_url}, applying bonus.")
+                    keyword_bonus = 0.3
+            initial_output['keyword_bonus'] = keyword_bonus
+            
+            found_pages = []
             if initial_output.get('deletion_page_url') and self._is_valid_html_url(initial_output.get('deletion_page_url')):
-                logger.info(f"Data deletion page found on initial page: {initial_output.get('deletion_page_url')}")
-                final_output = initial_output
-            else:
-                logger.info("Data deletion page not found. Starting fan-out search.")
+                found_pages.append(initial_output)
+
+            if not found_pages:
+                logger.info("Data deletion page not found on main page. Starting fan-out search.")
                 
                 internal_links = await self._get_internal_links(page, site_url)
                 
                 promising_keywords = [
-                    'delete', 'erasure', 'clear' 
-                    'manage', 'control', 'dashboard'
+                    'delete', 'erasure', 'clear',
+                    'manage', 'control', 'dashboard', 'privacy'
                 ]
                 promising_links = [
                     link for link in internal_links 
@@ -527,21 +597,28 @@ class PrivacyAnalyzer:
                         break
                     
                     task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, i + 1))
+                    task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
                     search_tasks.append(task)
                 
-                found_pages = await asyncio.gather(*search_tasks)
-                
-                valid_pages = [p for p in found_pages if p and p.get('deletion_page_url') and self._is_valid_html_url(p.get('deletion_page_url'))]
-                
-                if valid_pages:
-                    final_output = valid_pages[0] # Take the first valid result
-                    logger.info(f"Data deletion page found via fan-out search: {final_output.get('deletion_page_url')}")
-                else:
-                    final_output = {"reasoning": "No data deletion page found after search.", "source_url": site_url}
+                if search_tasks:
+                    found_from_fan_out = await asyncio.gather(*search_tasks)
+                    found_pages.extend([p for p in found_from_fan_out if p and p.get('deletion_page_url') and self._is_valid_html_url(p.get('deletion_page_url'))])
 
+            if found_pages:
+                def calculate_hybrid_score(page_result):
+                    confidence = page_result.get('confidence_score', 0.0)
+                    bonus = page_result.get('keyword_bonus', 0.0)
+                    return (0.7 * confidence) + (0.3 * bonus)
+
+                best_page = max(found_pages, key=calculate_hybrid_score)
+                hybrid_score = calculate_hybrid_score(best_page)
+                logger.info(f"Selected best data deletion page with hybrid score {hybrid_score:.2f}: {best_page.get('deletion_page_url')}")
+                await page.close()
+                return best_page
+
+            logger.info("No data deletion page found after deep search.")
             await page.close()
-            return final_output
+            return initial_output
 
         except Exception as e:
             logger.error(f"Error during data deletion page search for {site_url}: {e}")
@@ -598,7 +675,7 @@ class PrivacyAnalyzer:
             
         return response.data
 
-    async def _analyze_dpo_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
+    async def _analyze_dpo_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for DPO info during fan-out search.
         """
@@ -607,6 +684,16 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
             dpo_output = await self.extract_dpo_info_from_page(html, url)
+
+            # Calculate keyword bonus
+            keyword_bonus = 0.0
+            if user_keywords and dpo_output.get("email_address"):
+                html_lower = html.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {url}, applying bonus.")
+                    keyword_bonus = 0.3 # Assign a fixed bonus
+            
+            dpo_output['keyword_bonus'] = keyword_bonus
             return dpo_output
         except Exception as e:
             logger.error(f"Error analyzing DPO sub-page {url}: {e}")
@@ -614,7 +701,7 @@ class PrivacyAnalyzer:
         finally:
             await page.close()
 
-    async def find_dpo(self, browser, site_url: str) -> Dict[str, Any]:
+    async def find_dpo(self, browser, site_url: str, user_keywords: List[str] = None) -> Dict[str, Any]:
         """
         Navigates the site to find the DPO information page and extracts DPO contact details.
         """
@@ -627,13 +714,21 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             html_content = await page.content()
             initial_dpo_output = await self.extract_dpo_info_from_page(html_content, site_url)
-            
-            final_dpo_output = {}
 
+            # Calculate keyword bonus for initial page
+            keyword_bonus = 0.0
+            if user_keywords and initial_dpo_output.get("email_address"):
+                html_lower = html_content.lower()
+                if any(keyword.lower() in html_lower for keyword in user_keywords):
+                    logger.info(f"Keyword found on {site_url}, applying bonus.")
+                    keyword_bonus = 0.3
+            initial_dpo_output['keyword_bonus'] = keyword_bonus
+            
+            found_dpos = []
             if initial_dpo_output.get('email_address'):
-                logger.info(f"DPO found on initial page: {initial_dpo_output.get('email_address')}")
-                final_dpo_output = initial_dpo_output
-            else:
+                found_dpos.append(initial_dpo_output)
+
+            if not found_dpos:
                 logger.info("DPO email not found directly. Starting fan-out search for DPO.")
                 
                 internal_links = await self._get_internal_links(page, site_url)
@@ -651,21 +746,28 @@ class PrivacyAnalyzer:
                         break
                     
                     task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_dpo_sub_page_for_fan_out(task_page, link, i + 1))
+                    task = asyncio.create_task(self._analyze_dpo_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
                     dpo_search_tasks.append(task)
                 
-                found_dpos = await asyncio.gather(*dpo_search_tasks)
-                
-                valid_dpos = [dpo for dpo in found_dpos if dpo and dpo.get('email_address')]
-                
-                if valid_dpos:
-                    final_dpo_output = valid_dpos[0]
-                    logger.info(f"DPO found via fan-out search: {final_dpo_output.get('email_address')}")
-                else:
-                    final_dpo_output = {"reasoning": "No DPO information found after extensive internal link search.", "source_url": site_url}
+                if dpo_search_tasks:
+                    found_from_fan_out = await asyncio.gather(*dpo_search_tasks)
+                    found_dpos.extend([dpo for dpo in found_from_fan_out if dpo and dpo.get('email_address')])
 
+            if found_dpos:
+                def calculate_hybrid_score(dpo_result):
+                    confidence = dpo_result.get('confidence_score', 0.0)
+                    bonus = dpo_result.get('keyword_bonus', 0.0)
+                    return (0.7 * confidence) + (0.3 * bonus)
+
+                best_dpo = max(found_dpos, key=calculate_hybrid_score)
+                hybrid_score = calculate_hybrid_score(best_dpo)
+                logger.info(f"Selected best DPO with hybrid score {hybrid_score:.2f}: {best_dpo.get('email_address')}")
+                await page.close()
+                return best_dpo
+
+            logger.info("No DPO information found after extensive internal link search.")
             await page.close()
-            return final_dpo_output
+            return initial_dpo_output
 
         except Exception as e:
             logger.error(f"Error during DPO search for {site_url}: {e}")
