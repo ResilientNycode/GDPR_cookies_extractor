@@ -58,57 +58,75 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_privacy_policy(self, page) -> Dict[str, Any]:
+    async def _analyze_policy_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
         """
-        Orchestrates a deep search for the privacy policy URL.
-        It starts with an initial analysis of the given page and, if no policy is found,
-        it searches through internal links for promising leads.
+        Helper to analyze a sub-page for the privacy policy URL during fan-out search.
         """
-        # Get the URL directly from the page object
-        site_url = page.url
+        try:
+            logger.info(f"Analyzing for privacy policy (Fan-out Hop {hop_num}): {url}")
+            await page.goto(url, timeout=60000)
+            html = await page.content()
+            policy_output = await self._extract_policy_url_from_html(html, url)
+            return policy_output
+        except Exception as e:
+            logger.error(f"Error analyzing privacy policy sub-page {url}: {e}")
+            return {}
+        finally:
+            await page.close()
 
-        # Initial search on the current page
-        logger.info(f"Starting privacy policy search for {site_url}...")
-        initial_html = await page.content()
-        initial_llm_output = await self._extract_policy_url_from_html(initial_html, site_url)
+    async def find_privacy_policy(self, browser, site_url: str) -> Dict[str, Any]:
+        """
+        Orchestrates a deep search for the privacy policy URL using a parallel fan-out strategy.
+        """
+        page = None
+        try:
+            logger.info(f"Starting privacy policy search for {site_url}...")
+            page = await browser.new_page()
+            await page.goto(site_url, timeout=60000)
+            initial_html = await page.content()
+            initial_llm_output = await self._extract_policy_url_from_html(initial_html, site_url)
 
-        found_policies = []
-        if initial_llm_output.get("privacy_policy_url"):
-            found_policies.append(initial_llm_output)
+            found_policies = []
+            if initial_llm_output.get("privacy_policy_url"):
+                found_policies.append(initial_llm_output)
 
-        # If the initial search didn't find a URL, search internal links
-        if not initial_llm_output.get("privacy_policy_url"):
-            logger.info("Privacy policy not found on main page. Searching internal links...")
-            internal_links = await self._get_internal_links(page, site_url)
+            if not initial_llm_output.get("privacy_policy_url"):
+                logger.info("Privacy policy not found on main page. Starting fan-out search...")
+                internal_links = await self._get_internal_links(page, site_url)
 
-            promising_keywords = ['privacy', 'legal', 'terms', 'imprint', 'about', 'contact']
-            promising_links = [
-                link for link in internal_links
-                if any(keyword in link.lower() for keyword in promising_keywords)
-            ]
+                promising_keywords = ['privacy', 'legal', 'terms', 'imprint', 'about', 'contact']
+                promising_links = [
+                    link for link in internal_links
+                    if any(keyword in link.lower() for keyword in promising_keywords)
+                ]
 
-            for link in promising_links:
-                try:
-                    logger.info(f"Navigating to promising link: {link}")
-                    await page.goto(link, wait_until="domcontentloaded", timeout=30000)
-                    secondary_html = await page.content()
-                    secondary_output = await self._extract_policy_url_from_html(secondary_html, link)
-                    if secondary_output.get("privacy_policy_url"):
-                        logger.info(f"Found potential privacy policy at: {link}")
-                        found_policies.append(secondary_output)
-                except Exception as e:
-                    logger.warning(f"Could not analyze promising link {link}: {e}")
-                    continue
+                search_tasks = []
+                for i, link in enumerate(promising_links):
+                    if i >= self.max_hops:
+                        logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
+                        break
+                    
+                    task_page = await browser.new_page()
+                    task = asyncio.create_task(self._analyze_policy_sub_page_for_fan_out(task_page, link, i + 1))
+                    search_tasks.append(task)
+                
+                if search_tasks:
+                    found_from_fan_out = await asyncio.gather(*search_tasks)
+                    found_policies.extend([p for p in found_from_fan_out if p and p.get("privacy_policy_url")])
 
-        # If we found any policies, select the one with the highest confidence score
-        if len(found_policies) > 0:
-            best_policy = max(found_policies, key=lambda x: x.get('confidence_score', 0.0))
-            logger.info(f"Selected best privacy policy with score {best_policy.get('confidence_score')}: {best_policy.get('privacy_policy_url')}")
-            return best_policy
+            if found_policies:
+                best_policy = max(found_policies, key=lambda x: x.get('confidence_score', 0.0))
+                logger.info(f"Selected best privacy policy with score {best_policy.get('confidence_score')}: {best_policy.get('privacy_policy_url')}")
+                return best_policy
 
-        # Otherwise, return the original (failed) output
-        logger.info("No privacy policy found after deep search.")
-        return initial_llm_output
+            logger.info("No privacy policy found after deep search.")
+            return initial_llm_output
+        except Exception as e:
+            logger.error(f"Error during privacy policy search for {site_url}: {e}")
+            return {"reasoning": f"Failed during privacy policy search: {e}", "privacy_policy_url": None}
+        finally:
+            if page:
+                await page.close()
 
     # --- Cookie Analysis Methods ---
     async def categorize_cookies(self, cookies_data: list):
@@ -239,13 +257,28 @@ class PrivacyAnalyzer:
 
         return response.data
 
+    async def _analyze_cookie_declaration_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
+        """
+        Helper to analyze a sub-page for the cookie declaration URL during fan-out search.
+        """
+        try:
+            logger.info(f"Analyzing for cookie declaration (Fan-out Hop {hop_num}): {url}")
+            await page.goto(url, timeout=60000)
+            html = await page.content()
+            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url)
+            return cookie_decl_output
+        except Exception as e:
+            logger.error(f"Error analyzing cookie declaration sub-page {url}: {e}")
+            return {}
+        finally:
+            await page.close()
+
     async def find_cookie_declaration_page(self, browser, site_url: str) -> Dict[str, Any]:
         """
-        Orchestrates a deep search for the cookie declaration URL, mirroring the privacy policy search strategy.
+        Orchestrates a deep search for the cookie declaration URL using a parallel fan-out strategy.
         """
         page = None
         try:
-            # Initial search on the current page
             logger.info(f"Starting cookie declaration search for {site_url}...")
             page = await browser.new_page()
             await page.goto(site_url, timeout=60000)
@@ -256,9 +289,8 @@ class PrivacyAnalyzer:
             if initial_llm_output.get("cookie_declaration_url"):
                 found_declarations.append(initial_llm_output)
 
-            # If the initial search didn't find a URL, search internal links
             if not initial_llm_output.get("cookie_declaration_url"):
-                logger.info("Cookie declaration not found on main page. Searching internal links...")
+                logger.info("Cookie declaration not found on main page. Starting fan-out search...")
                 internal_links = await self._get_internal_links(page, site_url)
 
                 promising_keywords = ['cookie', 'technologies', 'legal', 'privacy', 'imprint']
@@ -267,28 +299,27 @@ class PrivacyAnalyzer:
                     if any(keyword in link.lower() for keyword in promising_keywords)
                 ]
 
-                for link in promising_links:
-                    try:
-                        logger.info(f"Navigating to promising link for cookie declaration: {link}")
-                        await page.goto(link, wait_until="domcontentloaded", timeout=30000)
-                        secondary_html = await page.content()
-                        secondary_output = await self._extract_cookie_declaration_url_from_html(secondary_html, link)
-                        if secondary_output.get("cookie_declaration_url"):
-                            logger.info(f"Found potential cookie declaration at: {link}")
-                            found_declarations.append(secondary_output)
-                    except Exception as e:
-                        logger.warning(f"Could not analyze promising link {link}: {e}")
-                        continue
+                search_tasks = []
+                for i, link in enumerate(promising_links):
+                    if i >= self.max_hops:
+                        logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
+                        break
+                    
+                    task_page = await browser.new_page()
+                    task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1))
+                    search_tasks.append(task)
 
-            # If we found any declarations, select the one with the highest confidence score
-            if len(found_declarations) > 0:
+                if search_tasks:
+                    found_from_fan_out = await asyncio.gather(*search_tasks)
+                    found_declarations.extend([p for p in found_from_fan_out if p and p.get("cookie_declaration_url")])
+
+            if found_declarations:
                 best_declaration = max(found_declarations, key=lambda x: x.get('confidence_score', 0.0))
                 logger.info(
                     f"Selected best cookie declaration with score {best_declaration.get('confidence_score')}: {best_declaration.get('cookie_declaration_url')}")
                 await page.close()
                 return best_declaration
 
-            # Otherwise, return the original (failed) output
             logger.info("No cookie declaration found after deep search.")
             await page.close()
             return initial_llm_output
@@ -440,7 +471,7 @@ class PrivacyAnalyzer:
 
         return response.data
 
-    async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, site_url: str, hop_num: int) -> Dict[str, Any]:
+    async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for the data deletion URL during fan-out search.
         """
@@ -496,7 +527,7 @@ class PrivacyAnalyzer:
                         break
                     
                     task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, site_url, i + 1))
+                    task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, i + 1))
                     search_tasks.append(task)
                 
                 found_pages = await asyncio.gather(*search_tasks)
@@ -567,7 +598,7 @@ class PrivacyAnalyzer:
             
         return response.data
 
-    async def _analyze_dpo_sub_page_for_fan_out(self, page, url: str, site_url: str, hop_num: int) -> Dict[str, Any]:
+    async def _analyze_dpo_sub_page_for_fan_out(self, page, url: str, hop_num: int) -> Dict[str, Any]:
         """
         Helper to analyze a sub-page for DPO info during fan-out search.
         """
@@ -620,7 +651,7 @@ class PrivacyAnalyzer:
                         break
                     
                     task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_dpo_sub_page_for_fan_out(task_page, link, site_url, i + 1))
+                    task = asyncio.create_task(self._analyze_dpo_sub_page_for_fan_out(task_page, link, i + 1))
                     dpo_search_tasks.append(task)
                 
                 found_dpos = await asyncio.gather(*dpo_search_tasks)

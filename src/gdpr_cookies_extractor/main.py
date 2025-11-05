@@ -92,7 +92,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             simple_links = simple_extractor(html_content)
             logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
 
-            llm_output = await analyzer.find_privacy_policy(page)
+            llm_output = await analyzer.find_privacy_policy(browser, current_url)
 
             # DPO & Retention Analysis (if policy found) ---
             analyses_results = {}
