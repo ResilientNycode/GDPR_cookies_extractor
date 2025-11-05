@@ -3,7 +3,7 @@
     "model": "llama3"
   },
   "scraper": {
-    "max_hops": 1,
+    "max_hops": 5,
     "cookie_banners": {
       "accept_selectors": [
         "text=Accept",
@@ -34,7 +34,7 @@
       "privacy statement"
     ],
     "cookie_declaration": ["cookie", "technologies", "imprint"],
-    "data_deletion": ["delete", "erasure", "clear", "manage", "", "dashboard"],
+    "data_deletion": ["delete", "erase", "clear", "manage", "dashboard"],
     "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
   }
 }
