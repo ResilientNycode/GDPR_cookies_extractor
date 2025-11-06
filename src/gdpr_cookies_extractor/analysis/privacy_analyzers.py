@@ -459,15 +459,15 @@ class PrivacyAnalyzer:
     # --- Data Deletion Methods ---
     async def extract_data_deletion_url_from_page(self, html_content: str, url: str):
         """
-        Analyzes the HTML of a given page to find the URL of the page
-        dedicated to managing or deleting personal data.
+        Analyzes the HTML of a given page to find potential URLs for data deletion/management.
+        Returns a list of candidate pages.
         """
         prompt = f"""
-        YYou are an expert in GDPR and web analysis. Your task is to find the single, primary link (URL) where a user can centrally manage or delete their personal data.
+        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can centrally manage or delete their personal data.
 
-        This MUST be the main "Privacy Dashboard" or "Account Deletion" page.
+        This could be a "Privacy Dashboard", "Account Deletion" page, or similar.
 
-        You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing. These are NOT the correct page.
+        You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing. These are NOT the correct pages.
 
         Analyze the provided HTML and search for links containing these specific high-priority keywords:
         - "privacy dashboard"
@@ -478,7 +478,7 @@ class PrivacyAnalyzer:
         - "close your account"
         - "delete your data"
 
-        This URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
+        Each URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
         Examples of INVALID URLs: /static/js/delete-script.js, /assets/css/styles.css, /images/delete-icon.png
 
         The URL of the page being analyzed is: {url}
@@ -489,38 +489,44 @@ class PrivacyAnalyzer:
         ---
 
         You MUST return a single JSON object and nothing else. Do not include any text or explanation.
-        Return your answer as a single JSON object with this structure:
+        Return your answer as a single JSON object with a single key "deletion_pages" which is a list of objects.
+        Each object in the list should have this structure:
         {{
-        "deletion_page_url": <string> or null,
-        "reasoning": <string>,
-        "confidence_score": <number>,
-        "source_section": <string> or null,
-        "source_url": "{url}"
+          "deletion_page_url": <string> or null,
+          "reasoning": <string>,
+          "confidence_score": <number>,
+          "source_section": <string> or null,
+          "source_url": "{url}"
         }}
 
         - "deletion_page_url": The full URL that leads to the data management/deletion page.
         - "reasoning": Briefly explain what keywords or hints led you to that URL.
         - "confidence_score": A score from 0.0 to 1.0 on your certainty in this being the primary management page.
         - "source_section": The anchor text (the clickable text) of the link you found. If the anchor text is generic (e.g., "click here"), use the text of the nearest heading (like `<h2>`, `<h3>`) above the link instead.
+        
+        If you find no relevant links, return an empty list: {{"deletion_pages": []}}.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
         
         if not response.success:
-            return {
-                "deletion_page_url": None,
+            return {{
+                "deletion_pages": [],
                 "reasoning": response.error,
-                "confidence_score": 0.0,
-                "source_url": url
-            }
+            }}
         
-        llm_returned_url = response.data.get("deletion_page_url")
-        if llm_returned_url and not self._is_valid_html_url(llm_returned_url):
-            logger.warning(f"LLM returned an invalid URL for data deletion: {llm_returned_url}. Setting to None.")
-            response.data["deletion_page_url"] = None
-            response.data["reasoning"] += " (URL was filtered as it was not a valid HTML page.)"
-            response.data["confidence_score"] = 0.0
+        pages = response.data.get("deletion_pages", [])
+        valid_pages = []
+        for page in pages:
+            llm_returned_url = page.get("deletion_page_url")
+            if llm_returned_url and self._is_valid_html_url(llm_returned_url):
+                absolute_url = urljoin(url, llm_returned_url)
+                page["deletion_page_url"] = absolute_url
+                valid_pages.append(page)
+            else:
+                logger.warning(f"LLM returned an invalid or missing URL for data deletion: {llm_returned_url}. Filtering it out.")
 
+        response.data["deletion_pages"] = valid_pages
         return response.data
 
     async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
@@ -533,15 +539,16 @@ class PrivacyAnalyzer:
             html = await page.content()
             deletion_output = await self.extract_data_deletion_url_from_page(html, url)
 
-            # Calculate keyword bonus
-            keyword_bonus = 0.0
-            if user_keywords and deletion_output.get("deletion_page_url"):
+            # Calculate keyword bonus for each found page
+            if user_keywords and deletion_output.get("deletion_pages"):
                 html_lower = html.lower()
-                if any(keyword.lower() in html_lower for keyword in user_keywords):
-                    logger.info(f"Keyword found on {url}, applying bonus.")
-                    keyword_bonus = 0.3 # Assign a fixed bonus
+                for page_result in deletion_output["deletion_pages"]:
+                    keyword_bonus = 0.0
+                    if any(keyword.lower() in html_lower for keyword in user_keywords):
+                        logger.info(f"Keyword found on {url}, applying bonus.")
+                        keyword_bonus = 0.3 # Assign a fixed bonus
+                    page_result['keyword_bonus'] = keyword_bonus
             
-            deletion_output['keyword_bonus'] = keyword_bonus
             return deletion_output
         except Exception as e:
             logger.error(f"Error analyzing data deletion sub-page {url}: {e}")
@@ -563,20 +570,23 @@ class PrivacyAnalyzer:
             html_content = await page.content()
             initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url)
 
-            # Calculate keyword bonus for initial page
-            keyword_bonus = 0.0
-            if user_keywords and initial_output.get("deletion_page_url"):
-                html_lower = html_content.lower()
-                if any(keyword.lower() in html_lower for keyword in user_keywords):
-                    logger.info(f"Keyword found on {site_url}, applying bonus.")
-                    keyword_bonus = 0.3
-            initial_output['keyword_bonus'] = keyword_bonus
-            
-            found_pages = []
-            if initial_output.get('deletion_page_url') and self._is_valid_html_url(initial_output.get('deletion_page_url')):
-                found_pages.append(initial_output)
+            all_found_pages = []
 
-            if not found_pages:
+            # Process initial findings
+            if initial_output.get("deletion_pages"):
+                # Apply keyword bonus to initial findings
+                if user_keywords:
+                    html_lower = html_content.lower()
+                    for page_result in initial_output["deletion_pages"]:
+                        keyword_bonus = 0.0
+                        if any(keyword.lower() in html_lower for keyword in user_keywords):
+                            logger.info(f"Keyword found on {site_url}, applying bonus.")
+                            keyword_bonus = 0.3
+                        page_result['keyword_bonus'] = keyword_bonus
+                all_found_pages.extend(initial_output["deletion_pages"])
+
+            # If no links found on the initial page, start the fan-out search
+            if not all_found_pages:
                 logger.info("Data deletion page not found on main page. Starting fan-out search.")
                 
                 internal_links = await self._get_internal_links(page, site_url)
@@ -601,24 +611,32 @@ class PrivacyAnalyzer:
                     search_tasks.append(task)
                 
                 if search_tasks:
-                    found_from_fan_out = await asyncio.gather(*search_tasks)
-                    found_pages.extend([p for p in found_from_fan_out if p and p.get('deletion_page_url') and self._is_valid_html_url(p.get('deletion_page_url'))])
+                    results_from_fan_out = await asyncio.gather(*search_tasks)
+                    for result in results_from_fan_out:
+                        if result and result.get("deletion_pages"):
+                            all_found_pages.extend(result["deletion_pages"])
 
-            if found_pages:
+            # After collecting all pages, find the best one
+            if all_found_pages:
                 def calculate_hybrid_score(page_result):
                     confidence = page_result.get('confidence_score', 0.0)
                     bonus = page_result.get('keyword_bonus', 0.0)
                     return (0.7 * confidence) + (0.3 * bonus)
 
-                best_page = max(found_pages, key=calculate_hybrid_score)
+                best_page = max(all_found_pages, key=calculate_hybrid_score)
                 hybrid_score = calculate_hybrid_score(best_page)
                 logger.info(f"Selected best data deletion page with hybrid score {hybrid_score:.2f}: {best_page.get('deletion_page_url')}")
+                
+                # Ensure the final returned page has an absolute URL
+                if best_page.get('deletion_page_url'):
+                    best_page['deletion_page_url'] = urljoin(best_page.get('source_url'), best_page.get('deletion_page_url'))
+
                 await page.close()
                 return best_page
 
             logger.info("No data deletion page found after deep search.")
             await page.close()
-            return initial_output
+            return {} # Return an empty dict if nothing is found
 
         except Exception as e:
             logger.error(f"Error during data deletion page search for {site_url}: {e}")
