@@ -457,19 +457,18 @@ class PrivacyAnalyzer:
             return {"reasoning": f"Failed during privacy page analysis: {e}", "source_url": policy_url}
 
     # --- Data Deletion Methods ---
-    async def extract_data_deletion_url_from_page(self, html_content: str, url: str):
+    async def extract_data_deletion_url_from_page(self, html_content: str, url: str, valid_hrefs: List[str]):
         """
         Analyzes the HTML of a given page to find potential URLs for data deletion/management.
         Returns a list of candidate pages.
         """
+        valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can centrally manage or delete their personal data.
+        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can centrally manage or delete their personal data, based only on the provided list of valid links.
 
-        This could be a "Privacy Dashboard", "Account Deletion" page, or similar.
+        CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL. If a relevant link is not in the list, you must ignore it.
 
-        You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing. These are NOT the correct pages.
-
-        Analyze the provided HTML and search for links containing these specific high-priority keywords:
+        Analyze the provided HTML and search for links related to these high-priority keywords:
         - "privacy dashboard"
         - "manage your personal data"
         - "how to access and control your personal data"
@@ -478,8 +477,7 @@ class PrivacyAnalyzer:
         - "close your account"
         - "delete your data"
 
-        Each URL MUST point to a navigable HTML page, NOT a script file (.js), CSS file (.css), image, or any other non-HTML asset.
-        Examples of INVALID URLs: /static/js/delete-script.js, /assets/css/styles.css, /images/delete-icon.png
+        You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing.
 
         The URL of the page being analyzed is: {url}
 
@@ -488,23 +486,28 @@ class PrivacyAnalyzer:
         {html_content}
         ---
 
+        A list of all valid links found in the page is provided here. You MUST choose from this list:
+        ---
+        {valid_hrefs_json}
+        ---
+
         You MUST return a single JSON object and nothing else. Do not include any text or explanation.
         Return your answer as a single JSON object with a single key "deletion_pages" which is a list of objects.
         Each object in the list should have this structure:
         {{
-          "deletion_page_url": <string> or null,
+          "deletion_page_url": <string>,
           "reasoning": <string>,
           "confidence_score": <number>,
           "source_section": <string> or null,
           "source_url": "{url}"
         }}
 
-        - "deletion_page_url": The full URL that leads to the data management/deletion page.
+        - "deletion_page_url": The URL that leads to the data management/deletion page. IT MUST BE A URL FROM THE `valid_links` LIST.
         - "reasoning": Briefly explain what keywords or hints led you to that URL.
-        - "confidence_score": A score from 0.0 to 1.0 on your certainty in this being the primary management page.
-        - "source_section": The anchor text (the clickable text) of the link you found. If the anchor text is generic (e.g., "click here"), use the text of the nearest heading (like `<h2>`, `<h3>`) above the link instead.
+        - "confidence_score": A score from 0.0 to 1.0 on your certainty.
+        - "source_section": The anchor text (the clickable text) of the link you found.
         
-        If you find no relevant links, return an empty list: {{"deletion_pages": []}}.
+        If you find no relevant links in the provided list, return an empty list: {{"deletion_pages": []}}.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -516,17 +519,18 @@ class PrivacyAnalyzer:
             }}
         
         pages = response.data.get("deletion_pages", [])
-        valid_pages = []
+        validated_pages = []
         for page in pages:
             llm_returned_url = page.get("deletion_page_url")
-            if llm_returned_url and self._is_valid_html_url(llm_returned_url):
+            # Final validation: ensure the returned URL is in the original list of hrefs
+            if llm_returned_url in valid_hrefs and self._is_valid_html_url(llm_returned_url):
                 absolute_url = urljoin(url, llm_returned_url)
                 page["deletion_page_url"] = absolute_url
-                valid_pages.append(page)
+                validated_pages.append(page)
             else:
-                logger.warning(f"LLM returned an invalid or missing URL for data deletion: {llm_returned_url}. Filtering it out.")
+                logger.warning(f"LLM returned a hallucinated or invalid URL: {llm_returned_url}. Filtering it out.")
 
-        response.data["deletion_pages"] = valid_pages
+        response.data["deletion_pages"] = validated_pages
         return response.data
 
     async def _analyze_deletion_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
@@ -537,7 +541,16 @@ class PrivacyAnalyzer:
             logger.info(f"Analyzing for data deletion (Fan-out Hop {hop_num}): {url}")
             await page.goto(url, timeout=60000)
             html = await page.content()
-            deletion_output = await self.extract_data_deletion_url_from_page(html, url)
+
+            # Extract all hrefs to prevent hallucination
+            links = await page.query_selector_all('a')
+            valid_hrefs = []
+            for link in links:
+                href = await link.get_attribute('href')
+                if href:
+                    valid_hrefs.append(href)
+
+            deletion_output = await self.extract_data_deletion_url_from_page(html, url, valid_hrefs)
 
             # Calculate keyword bonus for each found page
             if user_keywords and deletion_output.get("deletion_pages"):
@@ -568,7 +581,16 @@ class PrivacyAnalyzer:
             page = await browser.new_page()
             await page.goto(site_url, timeout=60000)
             html_content = await page.content()
-            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url)
+
+            # Extract all hrefs to prevent hallucination
+            links = await page.query_selector_all('a')
+            valid_hrefs = []
+            for link in links:
+                href = await link.get_attribute('href')
+                if href:
+                    valid_hrefs.append(href)
+
+            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url, valid_hrefs)
 
             all_found_pages = []
 
@@ -627,10 +649,6 @@ class PrivacyAnalyzer:
                 hybrid_score = calculate_hybrid_score(best_page)
                 logger.info(f"Selected best data deletion page with hybrid score {hybrid_score:.2f}: {best_page.get('deletion_page_url')}")
                 
-                # Ensure the final returned page has an absolute URL
-                if best_page.get('deletion_page_url'):
-                    best_page['deletion_page_url'] = urljoin(best_page.get('source_url'), best_page.get('deletion_page_url'))
-
                 await page.close()
                 return best_page
 
