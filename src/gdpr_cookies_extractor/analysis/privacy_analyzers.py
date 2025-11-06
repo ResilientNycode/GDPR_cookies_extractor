@@ -227,18 +227,18 @@ class PrivacyAnalyzer:
         """
         valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find all links (URLs) for the human-readable cookie declaration or cookie settings page, based *only* on the provided list of valid links.
+        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings page. This is the page that describes HOW the site uses cookies and often categorizes them (e.g., Functionality, Analytics, Advertising).
 
-        CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
+        CRITICAL RULES:
+        1. You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
+        2. The URL must point to an informational HTML page an end-user can read.
 
-        Analyze the provided HTML and search for links related to these high-priority keywords:
-        - 'Cookie Policy'
-        - 'Manage Cookies'
-        - 'Cookie Settings'
-        - 'Cookies and Technologies'
-        - 'cookie'
-        - 'technologies'
-        - 'privacy'
+        SEARCH STRATEGY:
+        1.  Analyze the provided HTML for `<a>` tags.
+        2.  Give the highest priority to links where the clickable text (anchor text) contains phrases like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', 'Manage Cookies', or 'About Cookies'.
+        3.  Also, look for links within or near text that discusses cookie usage. Search the HTML for keywords like "How we use cookies", "Functionality", "Security", "Analytics", "Advertising", and "Technologies". A link found near these keywords is a very strong candidate.
+        4.  As a lower priority, consider links where the `href` attribute itself contains the word 'cookie' or 'technologies'.
+        5.  Analyze the context around the link. Links inside lists (`<ul>`, `<ol>`) or near headings (`<h2>`, `<h3>`) related to "Privacy" or "Cookies" are also good candidates.
 
         The HTML content to analyze is below:
         ---
@@ -265,7 +265,7 @@ class PrivacyAnalyzer:
 
         INSTRUCTIONS FOR JSON FIELDS:
         - "cookie_declaration_url": The URL to the page. IT MUST BE A URL FROM THE `valid_links` LIST.
-        - "reasoning": Briefly explain which keywords (in the link text or URL) led you to this choice.
+        - "reasoning": Briefly explain which keywords (in the link text or surrounding text) and context led you to this choice.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
         - "source_section": The anchor text (the clickable text) of the link you found.
         
@@ -491,18 +491,14 @@ class PrivacyAnalyzer:
         """
         valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can centrally manage or delete their personal data, based only on the provided list of valid links.
+        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can delete their personal data or their entire account.
 
-        CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL. If a relevant link is not in the list, you must ignore it.
+        CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
 
-        Analyze the provided HTML and search for links related to these high-priority keywords:
-        - "privacy dashboard"
-        - "manage your personal data"
-        - "how to access and control your personal data"
-        - "Access and clear... data"
-        - "manage your data"
-        - "close your account"
-        - "delete your data"
+        SEARCH STRATEGY & PRIORITIES:
+        1.  Highest Priority: Look for links related to deleting an account or services. The anchor text or URL should contain keywords like 'delete your account', 'close your account', 'delete services'. This is the most important goal.
+        2.  Medium Priority: Look for links related to a central privacy dashboard or data management center. Keywords include 'privacy dashboard', 'manage your data', 'my account privacy'.
+        3.  Lower Priority: Look for links related to managing activity controls or clearing specific data types (like search history). Keywords include 'activity controls', 'manage activity', 'clear data'.
 
         You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing.
 
@@ -531,7 +527,7 @@ class PrivacyAnalyzer:
 
         - "deletion_page_url": The URL that leads to the data management/deletion page. IT MUST BE A URL FROM THE `valid_links` LIST.
         - "reasoning": Briefly explain what keywords or hints led you to that URL.
-        - "confidence_score": A score from 0.0 to 1.0 on your certainty.
+        - "confidence_score": A score from 0.0 to 1.0 on your certainty, following the priority guidelines.
         - "source_section": The anchor text (the clickable text) of the link you found.
         
         If you find no relevant links in the provided list, return an empty list: {{"deletion_pages": []}}.
