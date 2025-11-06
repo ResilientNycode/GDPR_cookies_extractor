@@ -227,14 +227,18 @@ class PrivacyAnalyzer:
         """
         valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the URL of the human-readable cookie declaration or cookie settings page, based *only* on the provided list of valid links.
+        You are an expert web analysis agent. Your task is to find all links (URLs) for the human-readable cookie declaration or cookie settings page, based *only* on the provided list of valid links.
 
         CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
 
-        SEARCH STRATEGY:
-        1.  Analyze the provided HTML for links (`<a>` tags).
-        2.  Give priority to links where the clickable text (anchor text) contains keywords like 'Cookie Policy', 'Manage Cookies', 'Cookie Settings', 'Cookies and Technologies'.
-        3.  If no clear anchor text is found, look at the link's 'href' attribute for keywords like 'cookie', 'technologies', 'privacy'.
+        Analyze the provided HTML and search for links related to these high-priority keywords:
+        - 'Cookie Policy'
+        - 'Manage Cookies'
+        - 'Cookie Settings'
+        - 'Cookies and Technologies'
+        - 'cookie'
+        - 'technologies'
+        - 'privacy'
 
         The HTML content to analyze is below:
         ---
@@ -254,13 +258,16 @@ class PrivacyAnalyzer:
         {{
           "cookie_declaration_url": <string> or null,
           "reasoning": <string>,
-          "confidence_score": <number>
+          "confidence_score": <number>,
+          "source_section": <string> or null,
+          "source_url": "{url}"
         }}
 
         INSTRUCTIONS FOR JSON FIELDS:
         - "cookie_declaration_url": The URL to the page. IT MUST BE A URL FROM THE `valid_links` LIST.
         - "reasoning": Briefly explain which keywords (in the link text or URL) led you to this choice.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
+        - "source_section": The anchor text (the clickable text) of the link you found.
         
         If you find no relevant links in the provided list, return an empty list: {{"cookie_declarations": []}}.
         """

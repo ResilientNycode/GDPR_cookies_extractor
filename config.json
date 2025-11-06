@@ -33,7 +33,7 @@
       "contact",
       "privacy statement"
     ],
-    "cookie_declaration": ["cookie", "technologies", "imprint"],
+    "cookie_declaration": ["cookie", "technologies", "how to use cookies"],
     "data_deletion": ["delete", "erase", "clear", "manage", "dashboard"],
     "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
   }
