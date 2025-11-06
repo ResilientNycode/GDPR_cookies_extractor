@@ -221,31 +221,36 @@ class PrivacyAnalyzer:
             
         return response.data
 
-    async def _extract_cookie_declaration_url_from_html(self, html_content: str, url: str):
+    async def _extract_cookie_declaration_url_from_html(self, html_content: str, url: str, valid_hrefs: List[str]):
         """
         Analyzes the HTML of a given page to find the cookie declaration page URL.
         """
+        valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the URL of the **human-readable** cookie declaration or cookie settings page.
+        You are an expert web analysis agent. Your task is to find the URL of the human-readable cookie declaration or cookie settings page, based *only* on the provided list of valid links.
 
-        CRITICAL RULES:
-        1.  MUST BE A NAVIGABLE PAGE: The URL must point to an informational HTML page an end-user can read.
-        2.  MUST NOT BE AN ASSET: The URL must NOT be a script (.js), stylesheet (.css), image (.png, .svg), or internal HTML fragment (like 'cookies.built.html' or 'cookie-fragment.html').
-        
+        CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
+
         SEARCH STRATEGY:
         1.  Analyze the provided HTML for links (`<a>` tags).
-        2.  Give priority to links where the *clickable text* (anchor text) contains keywords like 'Cookie Policy', 'Manage Cookies', 'Cookie Settings', 'Cookies and Technologies'.
+        2.  Give priority to links where the clickable text (anchor text) contains keywords like 'Cookie Policy', 'Manage Cookies', 'Cookie Settings', 'Cookies and Technologies'.
         3.  If no clear anchor text is found, look at the link's 'href' attribute for keywords like 'cookie', 'technologies', 'privacy'.
 
         The HTML content to analyze is below:
         ---
         {html_content}
         ---
+
+        A list of all valid links found in the page is provided here. You MUST choose from this list:
+        ---
+        {valid_hrefs_json}
+        ---
         
         The base URL of the page is: {url}
 
         You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
-        Return your answer as a single JSON object with the following structure:
+        Return your answer as a single JSON object with a single key "cookie_declarations" which is a list of objects.
+        Each object in the list should have this structure:
         {{
           "cookie_declaration_url": <string> or null,
           "reasoning": <string>,
@@ -253,34 +258,33 @@ class PrivacyAnalyzer:
         }}
 
         INSTRUCTIONS FOR JSON FIELDS:
-        - "cookie_declaration_url": The full, absolute URL to the page. If you find a relative path (e.g., "/legal/cookies"), you MUST combine it with the base URL ("{url}") to create a full URL.
+        - "cookie_declaration_url": The URL to the page. IT MUST BE A URL FROM THE `valid_links` LIST.
         - "reasoning": Briefly explain which keywords (in the link text or URL) led you to this choice.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
-        - If no valid URL is found, set "cookie_declaration_url" to null.
+        
+        If you find no relevant links in the provided list, return an empty list: {{"cookie_declarations": []}}.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
         
         if not response.success:
-            return {
-                "cookie_declaration_url": None,
+            return {{
+                "cookie_declarations": [],
                 "reasoning": response.error,
-                "confidence_score": 0.0
-            }
+            }}
         
-        # Ensure the URL is absolute
-        llm_returned_url = response.data.get("cookie_declaration_url")
-        if llm_returned_url:
-            absolute_url = urljoin(url, llm_returned_url)
-            response.data["cookie_declaration_url"] = absolute_url
-            
-            # Post-process to ensure the URL is a valid HTML page
-            if not self._is_valid_html_url(absolute_url):
-                logger.warning(f"LLM returned an invalid URL for cookie declaration: {absolute_url}. Setting to None.")
-                response.data["cookie_declaration_url"] = None
-                response.data["reasoning"] += " (URL was filtered as it was not a valid HTML page.)"
-                response.data["confidence_score"] = 0.0
+        declarations = response.data.get("cookie_declarations", [])
+        validated_declarations = []
+        for decl in declarations:
+            llm_returned_url = decl.get("cookie_declaration_url")
+            if llm_returned_url in valid_hrefs and self._is_valid_html_url(llm_returned_url):
+                absolute_url = urljoin(url, llm_returned_url)
+                decl["cookie_declaration_url"] = absolute_url
+                validated_declarations.append(decl)
+            else:
+                logger.warning(f"LLM returned a hallucinated or invalid URL for cookie declaration: {llm_returned_url}. Filtering it out.")
 
+        response.data["cookie_declarations"] = validated_declarations
         return response.data
 
     async def _analyze_cookie_declaration_sub_page_for_fan_out(self, page, url: str, hop_num: int, user_keywords: List[str] = None) -> Dict[str, Any]:
@@ -291,17 +295,26 @@ class PrivacyAnalyzer:
             logger.info(f"Analyzing for cookie declaration (Fan-out Hop {hop_num}): {url}")
             await page.goto(url, timeout=60000)
             html = await page.content()
-            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url)
+
+            links = await page.query_selector_all('a')
+            valid_hrefs = []
+            for link in links:
+                href = await link.get_attribute('href')
+                if href:
+                    valid_hrefs.append(href)
+
+            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url, valid_hrefs)
 
             # Calculate keyword bonus
-            keyword_bonus = 0.0
-            if user_keywords and cookie_decl_output.get("cookie_declaration_url"):
+            if user_keywords and cookie_decl_output.get("cookie_declarations"):
                 html_lower = html.lower()
-                if any(keyword.lower() in html_lower for keyword in user_keywords):
-                    logger.info(f"Keyword found on {url}, applying bonus.")
-                    keyword_bonus = 0.3 # Assign a fixed bonus
+                for decl in cookie_decl_output["cookie_declarations"]:
+                    keyword_bonus = 0.0
+                    if any(keyword.lower() in html_lower for keyword in user_keywords):
+                        logger.info(f"Keyword found on {url}, applying bonus.")
+                        keyword_bonus = 0.3 # Assign a fixed bonus
+                    decl['keyword_bonus'] = keyword_bonus
             
-            cookie_decl_output['keyword_bonus'] = keyword_bonus
             return cookie_decl_output
         except Exception as e:
             logger.error(f"Error analyzing cookie declaration sub-page {url}: {e}")
@@ -314,58 +327,65 @@ class PrivacyAnalyzer:
         Orchestrates a deep search for the cookie declaration URL using a parallel fan-out strategy.
         """
         page = None
+        all_found_declarations = []
         try:
             logger.info(f"Starting cookie declaration search for {site_url}...")
             page = await browser.new_page()
             await page.goto(site_url, timeout=60000)
             initial_html = await page.content()
-            initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url)
 
-            # Calculate keyword bonus for initial page
-            keyword_bonus = 0.0
-            if user_keywords and initial_llm_output.get("cookie_declaration_url"):
-                html_lower = initial_html.lower()
-                if any(keyword.lower() in html_lower for keyword in user_keywords):
-                    logger.info(f"Keyword found on {site_url}, applying bonus.")
-                    keyword_bonus = 0.3
-            initial_llm_output['keyword_bonus'] = keyword_bonus
+            links = await page.query_selector_all('a')
+            valid_hrefs = []
+            for link in links:
+                href = await link.get_attribute('href')
+                if href:
+                    valid_hrefs.append(href)
 
-            found_declarations = []
-            if initial_llm_output.get("cookie_declaration_url"):
-                found_declarations.append(initial_llm_output)
+            initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url, valid_hrefs)
 
-            if not initial_llm_output.get("cookie_declaration_url"):
-                logger.info("Cookie declaration not found on main page. Starting fan-out search...")
-                internal_links = await self._get_internal_links(page, site_url)
+            if initial_llm_output.get("cookie_declarations"):
+                if user_keywords:
+                    html_lower = initial_html.lower()
+                    for decl in initial_llm_output["cookie_declarations"]:
+                        keyword_bonus = 0.0
+                        if any(keyword.lower() in html_lower for keyword in user_keywords):
+                            logger.info(f"Keyword found on {site_url}, applying bonus.")
+                            keyword_bonus = 0.3
+                        decl['keyword_bonus'] = keyword_bonus
+                all_found_declarations.extend(initial_llm_output["cookie_declarations"])
 
-                promising_keywords = ['cookie', 'technologies', 'legal', 'privacy', 'imprint']
-                promising_links = [
-                    link for link in internal_links
-                    if any(keyword in link.lower() for keyword in promising_keywords)
-                ]
+            logger.info("Starting fan-out search for additional cookie declaration candidates...")
+            internal_links = await self._get_internal_links(page, site_url)
 
-                search_tasks = []
-                for i, link in enumerate(promising_links):
-                    if i >= self.max_hops:
-                        logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
-                        break
-                    
-                    task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
-                    search_tasks.append(task)
+            promising_keywords = ['cookie', 'technologies', 'legal', 'privacy', 'imprint']
+            promising_links = [
+                link for link in internal_links
+                if any(keyword in link.lower() for keyword in promising_keywords)
+            ]
 
-                if search_tasks:
-                    found_from_fan_out = await asyncio.gather(*search_tasks)
-                    found_declarations.extend([p for p in found_from_fan_out if p and p.get("cookie_declaration_url")])
+            search_tasks = []
+            for i, link in enumerate(promising_links):
+                if i >= self.max_hops:
+                    logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
+                    break
+                
+                task_page = await browser.new_page()
+                task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
+                search_tasks.append(task)
 
-            if found_declarations:
+            if search_tasks:
+                found_from_fan_out = await asyncio.gather(*search_tasks)
+                for result in found_from_fan_out:
+                    if result and result.get("cookie_declarations"):
+                        all_found_declarations.extend(result["cookie_declarations"])
+
+            if all_found_declarations:
                 def calculate_hybrid_score(declaration):
                     confidence = declaration.get('confidence_score', 0.0)
                     bonus = declaration.get('keyword_bonus', 0.0)
-                    # Score is 70% confidence, 30% bonus
                     return (0.7 * confidence) + (0.3 * bonus)
 
-                best_declaration = max(found_declarations, key=calculate_hybrid_score)
+                best_declaration = max(all_found_declarations, key=calculate_hybrid_score)
                 hybrid_score = calculate_hybrid_score(best_declaration)
                 logger.info(
                     f"Selected best cookie declaration with hybrid score {hybrid_score:.2f}: {best_declaration.get('cookie_declaration_url')}")
@@ -374,7 +394,7 @@ class PrivacyAnalyzer:
 
             logger.info("No cookie declaration found after deep search.")
             await page.close()
-            return initial_llm_output
+            return {"reasoning": "No cookie declaration found after deep search.", "source_url": site_url}
         
         except Exception as e:
             logger.error(f"Error during cookie declaration search for {site_url}: {e}")
