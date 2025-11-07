@@ -227,15 +227,15 @@ class PrivacyAnalyzer:
         """
         valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings page. This is the page that describes HOW the site uses cookies and often categorizes them (e.g., Functionality, Analytics, Advertising).
+        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings. This can be a separate page OR a section on the current page.
 
         CRITICAL RULES:
         1. You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
-        2. The URL must point to an informational HTML page an end-user can read.
+        2. The URL must point to an informational HTML page or a section within the current page.
 
         SEARCH STRATEGY:
-        1.  Analyze the provided HTML for `<a>` tags.
-        2.  Give the highest priority to links where the clickable text (anchor text) contains phrases like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', 'Manage Cookies', or 'About Cookies'.
+        1.  First, check if the current page contains a specific section about cookies. Look for `<a>` tags where the `href` attribute starts with a `#` (an anchor link). If you find an anchor link pointing to a section with a title like "Cookies and similar technologies", "How we use cookies", etc., prioritize this.
+        2.  If no relevant section is found on the current page, look for links to separate pages. Give high priority to links where the clickable text (anchor text) contains phrases like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', 'Manage Cookies', or 'About Cookies'.
         3.  Also, look for links within or near text that discusses cookie usage. Search the HTML for keywords like "How we use cookies", "Functionality", "Security", "Analytics", "Advertising", and "Technologies". A link found near these keywords is a very strong candidate.
         4.  As a lower priority, consider links where the `href` attribute itself contains the word 'cookie' or 'technologies'.
         5.  Analyze the context around the link. Links inside lists (`<ul>`, `<ol>`) or near headings (`<h2>`, `<h3>`) related to "Privacy" or "Cookies" are also good candidates.
@@ -264,7 +264,7 @@ class PrivacyAnalyzer:
         }}
 
         INSTRUCTIONS FOR JSON FIELDS:
-        - "cookie_declaration_url": The URL to the page. IT MUST BE A URL FROM THE `valid_links` LIST.
+        - "cookie_declaration_url": The URL to the page or the URL with an anchor to the section (e.g., "https://example.com/privacy#cookies"). IT MUST BE A URL FROM THE `valid_links` LIST.
         - "reasoning": Briefly explain which keywords (in the link text or surrounding text) and context led you to this choice.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
         - "source_section": The anchor text (the clickable text) of the link you found.
