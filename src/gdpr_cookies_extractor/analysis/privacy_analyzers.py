@@ -94,7 +94,7 @@ class PrivacyAnalyzer:
             - "description": Your generated description (or "No specific description available.").
 
         EXAMPLE OF REQUIRED OUTPUT FORMAT:
-        {{{{
+        {{
           "cookie_categories": [
             {{
               "category_name": "Strictly Necessary",
@@ -109,7 +109,7 @@ class PrivacyAnalyzer:
               ]
             }}
           ]
-        }}}}
+        }}
 
         INPUT COOKIES TO CATEGORIZE:
         {cookies_json_list}
@@ -228,27 +228,43 @@ class PrivacyAnalyzer:
 
     async def _extract_privacy_policy_info(self, html_content: str, url: str) -> Dict[str, Any]:
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the Privacy Policy from the given HTML content.
-        Analyze the page's content and links to find the most relevant information.
+        You are a specialized web analysis agent that ONLY returns JSON.
+        Your task is to find the Privacy Policy URL from the given HTML content.
 
-        **Step 1: Analyze Content**
-        Read the HTML text. Is this page *itself* the privacy policy? If so, you don't need to look for links.
+        **Analysis Steps:**
+        1.  **Check if the current page IS the policy:** Read the HTML text. If the content is clearly a privacy policy, this page's URL is the answer.
+        2.  **Find the best link:** If the current page is NOT the policy, scan all `<a>` tags for the most likely link to the privacy policy.
+            - Prioritize links in common locations like footers, headers, or dedicated "legal" sections.
+            - Keywords to look for in link text or surrounding elements are 'privacy', 'policy', 'data protection', 'GDPR', 'legal', 'terms'.
+            - If multiple promising links are found, return all of them in the "promising_links" array.
 
-        **Step 2: Find Links**
-        If the page is not the privacy policy, scan all `<a>` tags to find the link that leads to the privacy policy. Look for keywords like 'privacy', 'policy', 'GDPR', 'data protection'.
+        **CRITICAL JSON OUTPUT RULES:**
+        - You MUST return a single, valid JSON object. NO OTHER TEXT.
+        - The JSON object MUST have one of the following structures, and NOTHING ELSE.
 
-        **Instructions for JSON Output:**
-        You MUST return a single JSON object.
-        - If this page IS the privacy policy, return:
-          `{{"privacy_policy_url": "{url}", "is_embedded": true, "reasoning": "This page is the privacy policy."}}`
-        - If you find a clear link to the privacy policy, return:
-          `{{"privacy_policy_url": "<found_url>", "is_embedded": false, "reasoning": "Found a direct link."}}`
-        - If you find neither, but there are some plausible links, return a list of them:
+        - **Case 1: The policy URL is found (either this page or a link)**
+          Return a JSON object with the key "privacy_policy_url".
+          `{{"privacy_policy_url": "<URL of the policy>", "is_embedded": <true_if_this_page_is_the_policy_else_false>, "reasoning": "Brief explanation."}}`
+
+        - **Case 2: No clear policy URL is found, but there are potential links**
+          Return a JSON object with the key "promising_links".
           `{{"promising_links": [{{"url": "<url1>"}}, {{"url": "<url2>"}}]}}`
-        - If you find nothing at all, return an empty object: `{{}}`
 
-        The base URL of the page is: {url}
-        The HTML content to analyze is below:
+        - **Case 3: Nothing relevant is found**
+          Return an empty JSON object.
+          `{{}}`
+
+        **EXAMPLE 1 (Link Found):**
+        `{{"privacy_policy_url": "https://example.com/privacy", "is_embedded": false, "reasoning": "Found a direct link with the text 'Privacy Policy'."}}`
+
+        **EXAMPLE 2 (Page is the Policy):**
+        `{{"privacy_policy_url": "{url}", "is_embedded": true, "reasoning": "The content of this page is the privacy policy."}}`
+        
+        **EXAMPLE 3 (Nothing Found):**
+        `{{}}`
+
+        Base URL for context: {url}
+        HTML to analyze:
         ---
         {html_content}
         ---
@@ -264,26 +280,44 @@ class PrivacyAnalyzer:
 
     async def _extract_cookie_declaration_info(self, html_content: str, url: str) -> Dict[str, Any]:
         prompt = f"""
-        You are a GDPR expert. Your task is to find information about cookie usage from the given HTML.
+        You are a specialized web analysis agent that ONLY returns JSON.
+        Your task is to find information about cookie usage from the given HTML.
 
-        **Step 1: Analyze Content First**
-        Read the text of the HTML. Is there a section that clearly explains the types of cookies used, their purpose, and duration (a cookie declaration)? If you find this information, summarize it.
+        **Analysis Steps:**
+        1.  **Check if the current page IS the cookie declaration:** Read the HTML text. If the content clearly explains cookie usage, this page's URL is the answer.
+        2.  **Find the best link:** If the current page is NOT the cookie declaration, scan all `<a>` tags for the most likely link to a dedicated "Cookie Policy", "Cookie Declaration", or "Technologies" page.
 
-        **Step 2: Find a Link**
-        Only if you did not find a clear cookie declaration in the text, scan all `<a>` tags to find a link to a dedicated "Cookie Policy", "Cookie Declaration", or "Technologies" page.
+        **CRITICAL JSON OUTPUT RULES:**
+        - You MUST return a single, valid JSON object. NO OTHER TEXT.
+        - The JSON object MUST have one of the following structures, and NOTHING ELSE.
 
-        **Instructions for JSON Output:**
-        You MUST return a single JSON object.
-        - If you found the cookie information embedded in the text (Step 1), return:
+        - **Case 1: Cookie information is found embedded in the text**
+          Return a JSON object with the key "summary".
           `{{"summary": "<your_summary_of_the_cookie_section>", "is_embedded": true, "source_url": "{url}" }}`
-        - If you found a clear link to a cookie page (Step 2), return:
-          `{{"cookie_declaration_url": "<found_url>", "is_embedded": false, "source_url": "{url}"}}`
-        - If you find neither, but there are some plausible links, return a list of them:
-          `{{"promising_links": [{{"url": "<url1>"}}, {{"url": "<url2>"}}]}}`
-        - If you find nothing at all, return an empty object: `{{}}`
 
-        The base URL of the page is: {url}
-        The HTML content to analyze is below:
+        - **Case 2: A clear link to a cookie page is found**
+          Return a JSON object with the key "cookie_declaration_url".
+          `{{"cookie_declaration_url": "<found_url>", "is_embedded": false, "source_url": "{url}"}}`
+
+        - **Case 3: No clear cookie information or link is found, but there are potential links**
+          Return a JSON object with the key "promising_links".
+          `{{"promising_links": [{{"url": "<url1>"}}, {{"url": "<url2>"}}]}}`
+
+        - **Case 4: Nothing relevant is found**
+          Return an empty JSON object.
+          `{{}}`
+
+        **EXAMPLE 1 (Summary Found):**
+        `{{"summary": "This page describes the use of strictly necessary and analytical cookies.", "is_embedded": true, "source_url": "{url}" }}`
+
+        **EXAMPLE 2 (Link Found):**
+        `{{"cookie_declaration_url": "https://example.com/cookies", "is_embedded": false, "source_url": "{url}"}}`
+        
+        **EXAMPLE 3 (Nothing Found):**
+        `{{}}`
+
+        Base URL for context: {url}
+        HTML to analyze:
         ---
         {html_content}
         ---
@@ -315,10 +349,20 @@ class PrivacyAnalyzer:
           `{{"data_deletion_url": "<found_url>", "is_embedded": false, "source_url": "{url}"}}`
         - If you find neither, but there are some plausible links, return a list of them:
           `{{"promising_links": [{{"url": "<url1>"}}, {{"url": "<url2>"}}]}}`
-        - If you find nothing at all, return an empty object: `{{}}`
+        - If you find nothing at all, return an empty JSON object.
+          `{{}}`
 
-        The base URL of the page is: {url}
-        The HTML content to analyze is below:
+        **EXAMPLE 1 (Summary Found):**
+        `{{"summary": "Users can delete their account by navigating to settings and clicking 'Delete Account'.", "is_embedded": true, "source_url": "{url}" }}`
+
+        **EXAMPLE 2 (Link Found):**
+        `{{"data_deletion_url": "https://example.com/delete-data", "is_embedded": false, "source_url": "{url}"}}`
+        
+        **EXAMPLE 3 (Nothing Found):**
+        `{{}}`
+
+        Base URL for context: {url}
+        HTML to analyze:
         ---
         {html_content}
         ---
@@ -347,7 +391,7 @@ class PrivacyAnalyzer:
              return False
 
         try:
-            headers = {{'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}}
+            headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
             async with httpx.AsyncClient(follow_redirects=True, verify=False) as client:
                 response = await client.head(url, timeout=10, headers=headers)
                 if response.status_code >= 400: return False
