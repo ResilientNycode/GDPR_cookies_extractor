@@ -1,7 +1,9 @@
 import logging
 import json
-from playwright.async_api import async_playwright
+from playwright.async_api import Page
 from bs4 import BeautifulSoup
+from urllib.parse import urljoin, urlparse
+from typing import List
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +27,7 @@ def load_selectors_from_config():
             ]
         }
 
-async def handle_cookie_banner(page, action="accept"):
+async def handle_cookie_banner(page: Page, action="accept"):
     """
     Finds and clicks the cookie banner button based on the desired action.
     """
@@ -37,47 +39,73 @@ async def handle_cookie_banner(page, action="accept"):
 
     for selector in target_selectors:
         try:
-            button = page.locator(selector)
-            
-            # Check if the button is visible with a timeout. Playwright will automatically
-            # wait for the element to appear before giving up.
-            if await button.is_visible(timeout=5000):
-                logger.info(f"Clicking '{action}' button with selector: {selector}")
-                await button.click()
-                await page.wait_for_timeout(2000) # Give the page time to process the click
-                return True
+            # Use a short timeout to quickly check for each selector
+            button = page.locator(selector).first
+            await button.wait_for(state='visible', timeout=2000)
+            logger.info(f"Clicking '{action}' button with selector: {selector}")
+            await button.click(timeout=5000)
+            # Wait for a moment to let the action complete (e.g., banner disappears)
+            await page.wait_for_timeout(2000)
+            return True
         except Exception:
-            # Continue to the next selector if this one fails
+            # This is expected if a selector doesn't match; just try the next one.
+            logger.debug(f"Selector '{selector}' not found or failed, trying next.")
             continue
     
-    logger.info(f"No '{action}' button found for this site.")
+    logger.info(f"No '{action}' button found or all attempts failed.")
     return False
 
-def simple_extractor(html_page):
+async def extract_links(page: Page, page_url: str) -> List[str]:
     """
-    A simple rule-based function to find privacy-related links using BeautifulSoup.
+    Extracts all internal links from a page's HTML, correctly resolving relative URLs
+    using the <base> tag if present.
     """
-    soup = BeautifulSoup(html_page, "html.parser")
+    try:
+        html_content = await page.content()
+        soup = BeautifulSoup(html_content, "html.parser")
 
-    privacy_links = []
-    for a in soup.find_all("a", href=True):
-        href = a["href"].lower()
-        text = a.get_text(strip=True).lower()
-        if "privacy" in href or "privacy" in text:
-            privacy_links.append(a["href"])
+        # 1. Determine the base URL
+        base_tag = soup.find("base", href=True)
+        base_url = urljoin(page_url, base_tag["href"]) if base_tag else page_url
+        logger.info(f"Using base URL for link resolution: {base_url}")
 
-    privacy_links = list(set(privacy_links))
+        # 2. Determine the main domain for internal link checking
+        parsed_page_url = urlparse(page_url)
+        domain_parts = parsed_page_url.netloc.split('.')
+        main_domain = '.'.join(domain_parts[-2:]) if len(domain_parts) > 2 else parsed_page_url.netloc
 
-    logger.info(f"simple_extractor found {len(privacy_links)} privacy-related links.")
-    return privacy_links
+        links = set()
+        # 3. Find all links and resolve them
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            if href:
+                # Resolve the URL against the (potentially new) base URL
+                full_url = urljoin(base_url, href)
+                
+                # 4. Filter for internal links (including subdomains)
+                try:
+                    parsed_full_url = urlparse(full_url)
+                    # Check if the link's domain ends with the main domain
+                    if parsed_full_url.netloc.endswith(main_domain):
+                        # Exclude anchors and common non-html files
+                        if '#' not in full_url and not full_url.lower().endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.svg')):
+                            links.add(full_url)
+                except Exception:
+                    logger.warning(f"Could not parse resolved URL: {full_url}. Skipping.")
 
-async def get_page_content(page, url):
+        logger.info(f"Extractor found {len(links)} internal links on {page_url}.")
+        return list(links)
+
+    except Exception as e:
+        logger.error(f"Failed to extract links from {page_url}: {e}")
+        return []
+
+
+async def get_page_content(page: Page, url: str):
     """
     Navigates to a URL and returns the complete HTML content after JavaScript execution.
     """
-    # The page.content() method returns the full HTML source after JavaScript has run,
-    # which is ideal for scraping dynamic content.
     await page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    await page.wait_for_timeout(3000)
+    await page.wait_for_timeout(3000) # Extra wait for any lazy-loading scripts
     html_content = await page.content()
     return html_content

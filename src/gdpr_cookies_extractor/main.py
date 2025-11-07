@@ -11,13 +11,12 @@ from urllib.parse import urlparse, urljoin
 from typing import List, Dict, Any, Optional
 from dataclasses import asdict
 
-# Import relativi (presupponendo la struttura del progetto)
-from .utils.logging_setup import *
+# Relative imports
+from .utils.logging_setup import setup_logging
 from .utils.cookie_helpers import simplify_cookies, count_third_party_cookies
-from .analysis.scraper import handle_cookie_banner, simple_extractor
+from .analysis.scraper import handle_cookie_banner, extract_links
 from .analysis.ollama_providers import OllamaProvider
 from .analysis.privacy_analyzers import PrivacyAnalyzer
-from .analysis.llm_interface import AbstractLLMClient
 from .analysis.models import SiteAnalysisResult
 
 logger = logging.getLogger(__name__)
@@ -26,147 +25,102 @@ logger = logging.getLogger(__name__)
 def sanitize_filename(url: str) -> str:
     """Sanitizes a URL to be used as a valid filename."""
     parsed_url = urlparse(url)
-    
     sanitized = re.sub(r'[\\/*?:"<>|]', "_", parsed_url.netloc)
     return sanitized
 
-
-async def dump_data(current_url: str, scenario: str, cookies: list, browser, full_privacy_policy_url: Optional[str], timestamp: str):
-    """Dumps cookies to a JSON file and the privacy policy to an HTML file."""
+async def dump_html_content(current_url: str, scenario: str, browser, timestamp: str):
+    """Dumps the HTML content of the current page."""
     sanitized_url = sanitize_filename(current_url)
     dump_dir = f"output/dumps/analysis_results_{timestamp}"
     os.makedirs(dump_dir, exist_ok=True)
     
-    # Dump cookies
-    cookie_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_cookies.json"
-    with open(cookie_dump_path, "w") as f:
-        json.dump(cookies, f, indent=4)
-    logger.info(f"Dumped {len(cookies)} cookies to {cookie_dump_path}")
-
-    # Dump privacy policy
-    if full_privacy_policy_url:
-        try:
-            async with await browser.new_page() as policy_page:
-                await policy_page.goto(full_privacy_policy_url, wait_until="domcontentloaded", timeout=60000)
-                policy_html = await policy_page.content()
-                policy_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_privacy_policy.html"
-                with open(policy_dump_path, "w", encoding="utf-8") as f:
-                    f.write(policy_html)
-                logger.info(f"Dumped privacy policy to {policy_dump_path}")
-        except Exception as e:
-            logger.error(f"Failed to dump privacy policy for {full_privacy_policy_url}: {e}")
-
+    try:
+        page = browser.pages[-1] # Get the last active page
+        html_content = await page.content()
+        dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_page.html"
+        with open(dump_path, "w", encoding="utf-8") as f:
+            f.write(html_content)
+        logger.info(f"Dumped HTML content to {dump_path}")
+    except Exception as e:
+        logger.error(f"Failed to dump HTML content for {current_url}: {e}")
 
 async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str, user_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
-    Returns a SiteAnalysisResult object.
     """
     logger.info(f"Processing: {site_url} (Scenario: {scenario})")
+    page = None
     try:
-        async with await browser.new_page() as page:
-            # Navigation and Cookie Handling ---
-            await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
-            await handle_cookie_banner(page, action=scenario)
-            await page.wait_for_timeout(3000)  # Give the page time to process the click
+        page = await browser.new_page()
+        await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
+        await handle_cookie_banner(page, action=scenario)
+        await page.wait_for_timeout(3000)
 
-            # Get the final URL after potential redirects from navigation or cookie banners
-            current_url = page.url
-            logger.info(f"Final URL after navigation: {current_url}")
+        current_url = page.url
+        logger.info(f"Final URL after navigation: {current_url}")
 
-            cookies = await page.context.cookies()
-            logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {current_url}.")
+        cookies = await page.context.cookies()
+        simplified_cookies = simplify_cookies(cookies)
+        cookie_categories = await analyzer.categorize_cookies(simplified_cookies)
+        third_party_count = count_third_party_cookies(current_url, cookies)
+        
+        # This is a simplified version of link extraction for context
+        simple_links = await extract_links(page, current_url)
 
-            # Cookie Analysis ---
-            logger.debug(f"Cookies content: {cookies}")
-            simplified_cookies = simplify_cookies(cookies)
+        # --- Main Analysis Flow ---
+        analyses_results = {}
 
-            logger.debug("Categorizing cookies...")
-            cookie_categories = await analyzer.categorize_cookies(simplified_cookies)
+        # 1. Find Privacy Policy
+        policy_result = await analyzer.find_privacy_policy(
+            browser, current_url, user_keywords=user_keywords_config.get('privacy_policy', [])
+        )
+        analyses_results["privacy_policy"] = policy_result
+        privacy_policy_url = policy_result.get("privacy_policy_url")
 
-            third_party_count = count_third_party_cookies(current_url, cookies)
-
-            # Find Privacy Policy ---
-            logger.debug("Getting page content for simple extractor...")
-            html_content = await page.content()
-            simple_links = simple_extractor(html_content)
-            logger.info(f"[{scenario}] Simple extractor found links: {simple_links}")
-
-            llm_output = await analyzer.find_privacy_policy(
-                browser, current_url, user_keywords=user_keywords_config.get('privacy_policy', [])
+        # 2. Analyze from Privacy Policy if found
+        if privacy_policy_url:
+            logger.info(f"Privacy Policy found at {privacy_policy_url}. Starting secondary analysis.")
+            cookie_task = analyzer.find_cookie_declaration(
+                browser, privacy_policy_url, user_keywords=user_keywords_config.get('cookie_declaration', [])
             )
-
-            # DPO & Retention Analysis (if policy found) ---
-            analyses_results = {}
-            full_privacy_policy_url = None
-            
-            if llm_output.get("privacy_policy_url"):
-                policy_url_path = llm_output.get("privacy_policy_url")
-                full_privacy_policy_url = urljoin(current_url, policy_url_path)
-
-            await dump_data(current_url, scenario, cookies, browser, full_privacy_policy_url, timestamp)
-            
-
-            if full_privacy_policy_url:
-                # Define tasks for parallel execution
-                dpo_task = asyncio.create_task(analyzer.find_dpo(
-                    browser, full_privacy_policy_url,
-                    user_keywords=user_keywords_config.get('dpo', [])
-                ))
-                retention_task = asyncio.create_task(analyzer.analyze_retention_policy(
-                    browser, full_privacy_policy_url
-                ))
-                cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
-                    browser, full_privacy_policy_url,
-                    user_keywords=user_keywords_config.get('cookie_declaration', [])
-                ))
-                deletion_page_task = asyncio.create_task(analyzer.find_data_deletion_page(
-                    browser, full_privacy_policy_url,
-                    user_keywords=user_keywords_config.get('data_deletion', [])
-                ))
-                
-                # Run tasks and gather results
-                dpo_res, retention_res, cookie_decl_res, deletion_res = await asyncio.gather(
-                    dpo_task, retention_task, cookie_declaration_task, deletion_page_task
-                )
-                
-                # Collect results into the extensible dictionary
-                analyses_results = {
-                    "dpo": dpo_res,
-                    "retention": retention_res,
-                    "cookie_declaration": cookie_decl_res,
-                    "data_deletion": deletion_res,
-                }
-
-            # Format Success Result ---
-            return SiteAnalysisResult.from_outputs(
-                site_url=current_url,
-                scenario=scenario,
-                cookies=cookies,
-                cookie_categories=cookie_categories,
-                third_party_count=third_party_count,
-                llm_output=llm_output,
-                privacy_policy_url=full_privacy_policy_url,
-                simple_extractor_links=simple_links,
-                **analyses_results
+            deletion_task = analyzer.find_data_deletion_info(
+                browser, privacy_policy_url, user_keywords=user_keywords_config.get('data_deletion', [])
             )
+            
+            cookie_res, deletion_res = await asyncio.gather(cookie_task, deletion_task)
+            
+            analyses_results["cookie_declaration"] = cookie_res
+            analyses_results["data_deletion"] = deletion_res
+        else:
+            logger.warning(f"Could not find privacy policy for {current_url}. Skipping secondary analysis.")
+
+        await dump_html_content(current_url, scenario, browser, timestamp)
+
+        return SiteAnalysisResult(
+            website_url=current_url,
+            scenario=scenario,
+            cookies_count=len(cookies),
+            third_party_cookies_count=third_party_count,
+            raw_cookies_data=cookies,
+            categorized_cookies=cookie_categories.get("cookie_categories", []),
+            simple_extractor_links=simple_links,
+            analyses=analyses_results
+        )
 
     except Exception as e:
-        logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
+        logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}", exc_info=True)
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
+    finally:
+        if page:
+            await page.close()
 
 async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser, timestamp: str, user_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
-    """
-    Creates and runs all analysis tasks concurrently.
-    """
     tasks = []
-    # scenarios = ["accept", "reject"]
     scenarios = ["accept"]
 
-    for index, row in sites_df.iterrows():
+    for _, row in sites_df.iterrows():
         site_url = row['website_url']
-        parsed_url = urlparse(site_url)
-        if not parsed_url.scheme:
+        if not urlparse(site_url).scheme:
             site_url = "https://" + site_url
             
         for scenario in scenarios:
@@ -174,77 +128,43 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
                 process_site_scenario(browser, analyzer, site_url, scenario, timestamp, user_keywords_config)
             )
     
-    results = await asyncio.gather(*tasks)
-    return results
-
+    return await asyncio.gather(*tasks)
 
 def save_results(results: List[SiteAnalysisResult], timestamp: str):
-    """
-    Saves the list of result dataclasses to a timestamped JSON file.
-    """
     results_dicts = [asdict(result) for result in results]
-    logger.debug(f"Data to be serialized: {results_dicts}") 
     filename = f"output/analysis_results_{timestamp}.json"
+    os.makedirs("output", exist_ok=True)
     with open(filename, 'w', encoding='utf-8') as f:
         json.dump(results_dicts, f, indent=4, ensure_ascii=False)
     logger.info(f"Analysis complete. Results saved to {filename}")
 
+def load_config(key: str, default: Any) -> Any:
+    try:
+        with open('config.json', 'r') as f:
+            config = json.load(f)
+        return config.get(key, default)
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        logger.warning(f"Could not load '{key}' from config.json: {e}. Using default.")
+        return default
 
-def create_output_directories():
-    """
-    Creates the necessary output directories if they don't already exist.
-    """
-    os.makedirs("output", exist_ok=True)
+async def main_async():
+    setup_logging()
+    logger.info("Starting GDPR Cookie Analysis...")
+
     os.makedirs("output/dumps", exist_ok=True)
-    logger.info("Ensured output directories exist.")
 
+    if len(sys.argv) > 1:
+        sites_df = pd.DataFrame([{'website_url': sys.argv[1]}])
+    else:
+        try:
+            sites_df = pd.read_csv("sites.csv")
+        except FileNotFoundError:
+            logger.error("'sites.csv' not found. Please create it or provide a URL as an argument.")
+            return
 
-def load_llm_config():
-    """
-    Loads LLM configuration from config.json.
-    """
-    try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-        return config['llm']
-    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Could not load LLM config from config.json: {e}. Using default.")
-        return {"model": "llama3"}
-
-
-def load_scraper_config():
-    """
-    Loads scraper configuration from config.json.
-    """
-    try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-        return config['scraper']
-    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Could not load scraper config from config.json: {e}. Using default.")
-        return {"max_hops": 3}
-
-
-def load_user_defined_keywords():
-    """
-    Loads user-defined keywords from config.json.
-    """
-    try:
-        with open('config.json', 'r') as f:
-            config = json.load(f)
-        return config.get('user_defined_keywords', {})
-    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
-        logger.warning(f"Could not load user_defined_keywords from config.json: {e}. Using empty dict.")
-        return {}
-
-
-async def gdpr_analysis(sites_df):
-    """
-    Orchestrates the setup, execution, and saving of the analysis.
-    """
-    llm_config = load_llm_config()
-    scraper_config = load_scraper_config()
-    user_keywords_config = load_user_defined_keywords()
+    llm_config = load_config('llm', {"model": "llama3"})
+    scraper_config = load_config('scraper', {"max_hops": 3})
+    user_keywords_config = load_config('user_defined_keywords', {})
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
     llm_provider = OllamaProvider(model=llm_config.get('model', 'llama3'))
@@ -253,43 +173,15 @@ async def gdpr_analysis(sites_df):
         max_hops=scraper_config.get('max_hops', 3)
     )
     
-    
     async with async_playwright() as p:
         browser = await p.chromium.launch()
-        
         all_results = await run_all_analyses(sites_df, analyzer, browser, timestamp, user_keywords_config)
-        
         await browser.close()
     
     save_results(all_results, timestamp)
 
-
 def main():
-    setup_logging()
-    logger.info("Starting GDPR Cookie Analysis...")
-
-    create_output_directories()
-
-    if len(sys.argv) > 1:
-        site_url_from_cli = sys.argv[1]
-        logger.info(f"Processing single URL from command line: {site_url_from_cli}")
-        sites_df = pd.DataFrame([{'website_url': site_url_from_cli}])
-    else:
-        try:
-            logger.info("Loading URLs from sites.csv...")
-            sites_df = pd.read_csv("sites.csv", header=None, names=['index_col', 'website_url'])
-            sites_df = sites_df.drop(columns=['index_col'])
-            logger.info(f"Loaded {len(sites_df)} sites from CSV.")
-        except FileNotFoundError:
-            logger.error("No URL provided and 'sites.csv' file not found.")
-            logger.error("Usage: poetry run main <your_url> OR create 'sites.csv'")
-            sys.exit(1)
-        except Exception as e:
-            logger.error(f"Error reading sites.csv: {e}")
-            sys.exit(1)
-
-    asyncio.run(gdpr_analysis(sites_df))
-
+    asyncio.run(main_async())
 
 if __name__ == "__main__":
     main()
