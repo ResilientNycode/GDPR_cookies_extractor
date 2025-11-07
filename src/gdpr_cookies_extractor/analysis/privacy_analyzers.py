@@ -2,6 +2,7 @@ import json
 import logging
 from urllib.parse import urljoin, urlparse
 from typing import Dict, Any, List
+import httpx
 from .llm_interface import AbstractLLMClient, LLMResponse 
 import asyncio
 
@@ -16,6 +17,20 @@ class PrivacyAnalyzer:
         self.llm_client = llm_client
         self.max_hops = max_hops
         logger.info(f"PrivacyAnalyzer initialized with client: {type(llm_client).__name__} and max_hops: {max_hops}")
+
+    async def _is_url_valid(self, url: str) -> bool:
+        """
+        Checks if a URL is valid by making a HEAD request.
+        """
+        if not url or not url.startswith(('http://', 'https://')):
+            return False
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.head(url, follow_redirects=True, timeout=10)
+            return response.status_code == 200
+        except httpx.RequestError as e:
+            logger.warning(f"URL validation failed for {url}: {e}")
+            return False
 
     # --- Privacy Policy Methods ---
     async def _extract_policy_url_from_html(self, html_content: str, url: str):
@@ -125,9 +140,10 @@ class PrivacyAnalyzer:
                         logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
                         break
                     
-                    task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_policy_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
-                    search_tasks.append(task)
+                    if await self._is_url_valid(link):
+                        task_page = await browser.new_page()
+                        task = asyncio.create_task(self._analyze_policy_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
+                        search_tasks.append(task)
                 
                 if search_tasks:
                     found_from_fan_out = await asyncio.gather(*search_tasks)
@@ -184,7 +200,7 @@ class PrivacyAnalyzer:
         7.  Each category object must contain:
             - "category_name": The name of the category.
             - "cookies": A list of objects for the cookies in that category.
-        8.  Each cookie object in the *output* "cookies" list MUST have this structure:
+        8.  Each cookie object in the output "cookies" list MUST have this structure:
             - "name": The original cookie name.
             - "domain": The original cookie domain.
             - "description": Your generated description (or "No specific description available.").
@@ -221,41 +237,32 @@ class PrivacyAnalyzer:
             
         return response.data
 
-    async def _extract_cookie_declaration_url_from_html(self, html_content: str, url: str, valid_hrefs: List[str]):
+    async def _extract_cookie_declaration_url_from_html(self, html_content: str, url: str):
         """
         Analyzes the HTML of a given page to find the cookie declaration page URL.
         """
-        valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings. This can be a separate page OR a section on the current page.
+        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration or cookie policy page.
 
         CRITICAL RULES:
-        1. You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL. If you cannot find a link that is clearly and explicitly about cookies or data technologies, return an empty list.
-        2. The URL must point to an informational HTML page or a section within the current page.
+        1.  DO NOT CONFUSE "Privacy Policy" with "Cookie Policy". They are different. If a link only says "Privacy Policy", it is NOT the correct link, unless it is the only link available that contains cookie information.
+        2.  You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
 
-        SEARCH STRATEGY:
-        1.  First, check if the current page contains a specific section about cookies. Look for `<a>` tags where the `href` attribute starts with a `#` (an anchor link). If you find an anchor link pointing to a section with a title like "Cookies and similar technologies", "How we use cookies", etc., prioritize this. A link with the anchor text `maincookiessimilartechnologiesmodule` is a very strong candidate.
-        2.  If no relevant section is found on the current page, look for links to separate pages. Give high priority to links where the clickable text (anchor text) contains phrases like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', 'Manage Cookies', or 'About Cookies'.
-        3.  A link with the text 'Technologies' is a very strong candidate, as cookie details are often found there. For example, a link like `https://policies.google.com/technologies/cookies` is a perfect match.
-        4.  Also, look for links within or near text that discusses cookie usage. Search the HTML for keywords like "How we use cookies", "Functionality", "Security", "Analytics", "Advertising", and "Technologies". A link found near these keywords is a very strong candidate.
-        5.  As a lower priority, consider links where the `href` attribute itself contains the word 'cookie' or 'technologies'.
-        6.  Analyze the context around the link. Links inside lists (`<ul>`, `<ol>`) or near headings (`<h2>`, `<h3>`) related to "Privacy" or "Cookies" are also good candidates.
+        SEARCH STRATEGY (Highest to Lowest Priority):
+        1.  Anchor Links: First, check for anchor links (starting with `#`) on the current page. A link pointing to a section like "Cookies and similar technologies" is a perfect match (e.g., `#cookies`).
+        2.  "Technologies" Page: Look for a link with the anchor text "Technologies" or a URL containing `/technologies/`. This is very common (e.g., `policies.google.com/technologies/cookies`). This is a high-priority match.
+        3.  "Cookie Policy" Page: Look for links with explicit anchor text like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', or 'Manage Cookies'.
+        4.  Privacy Policy (Last Resort): If and only if no "Technologies" or "Cookie" specific links are found, return a link to the main "Privacy Policy" if it contains the word "cookie" in its URL (e.g., `.../privacy-and-cookies`).
 
         The HTML content to analyze is below:
         ---
         {html_content}
         ---
-
-        A list of all valid links found in the page is provided here. You MUST choose from this list:
-        ---
-        {valid_hrefs_json}
-        ---
         
         The base URL of the page is: {url}
 
-        You MUST return a single JSON object and nothing else. Do not include any text or explanation before or after the JSON object.
+        You MUST return a single JSON object and nothing else.
         Return your answer as a single JSON object with a single key "cookie_declarations" which is a list of objects.
-        Each object in the list should have this structure:
         {{
           "cookie_declaration_url": <string> or null,
           "reasoning": <string>,
@@ -264,10 +271,9 @@ class PrivacyAnalyzer:
           "source_url": "{url}"
         }}
 
-        INSTRUCTIONS FOR JSON FIELDS:
-        - "cookie_declaration_url": The URL to the page or the URL with an anchor to the section (e.g., "https://example.com/privacy#cookies"). IT MUST BE A URL FROM THE `valid_links` LIST.
-        - "reasoning": Briefly explain which keywords (in the link text or surrounding text) and context led you to this choice.
-        - "confidence_score": From 0.0 to 1.0, how certain you are.
+        - "cookie_declaration_url": The URL. IT MUST BE A URL FROM THE `valid_links` LIST.
+        - "reasoning": Explain which strategy (1, 2, 3, or 4) and keywords led you to this choice.
+        - "confidence_score": 0.0 to 1.0. A "Technologies" or "Cookie Policy" link (Strategy 2-3) should have a high score (0.9-1.0). A "Privacy Policy" link (Strategy 4) should have a low score (0.5).
         - "source_section": The anchor text (the clickable text) of the link you found.
         
         If you find no relevant links in the provided list, return an empty list: {{"cookie_declarations": []}}.
@@ -285,29 +291,8 @@ class PrivacyAnalyzer:
         validated_declarations = []
         for decl in declarations:
             llm_returned_url = decl.get("cookie_declaration_url")
-            
-            # New validation logic to accept anchor links on the current page
-            is_valid = False
-            if llm_returned_url:
-                # Case 1: The returned URL is exactly one of the hrefs found on the page.
-                if llm_returned_url in valid_hrefs:
-                    is_valid = True
-                # Case 2: The returned URL is a full URL with an anchor pointing to the current page.
-                else:
-                    try:
-                        parsed_llm_url = urlparse(llm_returned_url)
-                        parsed_current_url = urlparse(url)
-                        # Check if it's an anchor link for the current page
-                        if (parsed_llm_url.fragment and
-                            parsed_llm_url.scheme == parsed_current_url.scheme and
-                            parsed_llm_url.netloc == parsed_current_url.netloc and
-                            parsed_llm_url.path.rstrip('/') == parsed_current_url.path.rstrip('/')):
-                            is_valid = True
-                    except ValueError:
-                        is_valid = False # Invalid URL format
-
-            if is_valid and self._is_valid_html_url(llm_returned_url):
-                absolute_url = urljoin(url, llm_returned_url)
+            absolute_url = urljoin(url, llm_returned_url)
+            if await self._is_url_valid(absolute_url):
                 decl["cookie_declaration_url"] = absolute_url
                 validated_declarations.append(decl)
             else:
@@ -325,14 +310,7 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
 
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url, valid_hrefs)
+            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url)
 
             # Calculate keyword bonus
             if user_keywords and cookie_decl_output.get("cookie_declarations"):
@@ -363,14 +341,7 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             initial_html = await page.content()
 
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url, valid_hrefs)
+            initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url)
 
             if initial_llm_output.get("cookie_declarations"):
                 if user_keywords:
@@ -398,9 +369,10 @@ class PrivacyAnalyzer:
                     logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
                     break
                 
-                task_page = await browser.new_page()
-                task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
-                search_tasks.append(task)
+                if await self._is_url_valid(link):
+                    task_page = await browser.new_page()
+                    task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
+                    search_tasks.append(task)
 
             if search_tasks:
                 found_from_fan_out = await asyncio.gather(*search_tasks)
@@ -441,8 +413,8 @@ class PrivacyAnalyzer:
         Your task is to find and summarize the data retention policy from the provided HTML.
 
         CRITICAL RULES:
-        1.  NO HALLUCINATIONS: You MUST NOT invent information. Your summary must be 100% based *only* on the text found. If the text is vague (e.g., "as long as necessary"), your summary MUST be vague. Do not add specific details (like "12 months") if they are not explicitly written.
-        2.  STRICT EXTRACTION: Your primary goal is to find the *exact* text.
+        1.  NO HALLUCINATIONS: You MUST NOT invent information. Your summary must be 100% based only on the text found. If the text is vague (e.g., "as long as necessary"), your summary MUST be vague. Do not add specific details (like "12 months") if they are not explicitly written.
+        2.  STRICT EXTRACTION: Your primary goal is to find the exact text.
         3.  SECTION IDENTIFICATION: You must identify the heading or title of the section where you found the information (e.g., "Retention of Personal Data").
 
         The URL of the page being analyzed is: {url}
@@ -465,7 +437,7 @@ class PrivacyAnalyzer:
         INSTRUCTIONS FOR JSON FIELDS:
         - "retention_policy_summary": A brief summary of the policy.".
         - "source_section": The exact text of the nearest section heading (e.g., "Data Retention", "How We Keep Your Data").
-        - "reasoning": Briefly explain *why* you chose this section and text.
+        - "reasoning": Briefly explain why you chose this section and text.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
         
         If no retention policy is found, set "retention_policy_summary" and "source_section" to null.
@@ -506,21 +478,20 @@ class PrivacyAnalyzer:
             return {"reasoning": f"Failed during privacy page analysis: {e}", "source_url": policy_url}
 
     # --- Data Deletion Methods ---
-    async def extract_data_deletion_url_from_page(self, html_content: str, url: str, valid_hrefs: List[str]):
+    async def extract_data_deletion_url_from_page(self, html_content: str, url: str):
         """
         Analyzes the HTML of a given page to find potential URLs for data deletion/management.
         Returns a list of candidate pages.
         """
-        valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can delete their personal data or their entire account.
+        You are an expert in GDPR and web analysis. Your task is to find links where a user can delete their personal data or their entire account.
 
         CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
 
         SEARCH STRATEGY & PRIORITIES:
-        1.  Highest Priority: Look for links related to deleting an account or services. The anchor text or URL should contain keywords like 'delete your account', 'close your account', 'delete services'. This is the most important goal.
-        2.  Medium Priority: Look for links related to a central privacy dashboard or data management center. Keywords include 'privacy dashboard', 'manage your data', 'my account privacy'.
-        3.  Lower Priority: Look for links related to managing activity controls or clearing specific data types (like search history). Keywords include 'activity controls', 'manage activity', 'clear data'.
+        1.  Highest Priority (P1): Look for links related to deleting an account or services. Anchor text or URL should contain keywords like 'delete your account', 'close your account', 'delete services'.
+        2.  Medium Priority (P2): Look for links to a central privacy dashboard or data management center. Keywords include 'privacy dashboard', 'manage your data', 'my account privacy', 'data & privacy'.
+        3.  Low Priority (P3): Look for links to manage activity controls. Keywords: 'activity controls', 'manage activity'.
 
         You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing.
 
@@ -531,25 +502,20 @@ class PrivacyAnalyzer:
         {html_content}
         ---
 
-        A list of all valid links found in the page is provided here. You MUST choose from this list:
-        ---
-        {valid_hrefs_json}
-        ---
-
-        You MUST return a single JSON object and nothing else. Do not include any text or explanation.
+        You MUST return a single JSON object and nothing else.
         Return your answer as a single JSON object with a single key "deletion_pages" which is a list of objects.
         Each object in the list should have this structure:
         {{
           "deletion_page_url": <string>,
-          "reasoning": <string>,
+          "reasoning": <string (Must include 'P1', 'P2', or 'P3')>,
           "confidence_score": <number>,
           "source_section": <string> or null,
           "source_url": "{url}"
         }}
 
         - "deletion_page_url": The URL that leads to the data management/deletion page. IT MUST BE A URL FROM THE `valid_links` LIST.
-        - "reasoning": Briefly explain what keywords or hints led you to that URL.
-        - "confidence_score": A score from 0.0 to 1.0 on your certainty, following the priority guidelines.
+        - "reasoning": Briefly explain what keywords led you to that URL and which Priority (P1, P2, P3) it matches.
+        - "confidence_score": A score from 0.0 to 1.0. A P1 link should have a higher score (0.8-1.0) than a P3 link (0.5-0.6).
         - "source_section": The anchor text (the clickable text) of the link you found.
         
         If you find no relevant links in the provided list, return an empty list: {{"deletion_pages": []}}.
@@ -567,9 +533,8 @@ class PrivacyAnalyzer:
         validated_pages = []
         for page in pages:
             llm_returned_url = page.get("deletion_page_url")
-            # Final validation: ensure the returned URL is in the original list of hrefs
-            if llm_returned_url in valid_hrefs and self._is_valid_html_url(llm_returned_url):
-                absolute_url = urljoin(url, llm_returned_url)
+            absolute_url = urljoin(url, llm_returned_url)
+            if await self._is_url_valid(absolute_url):
                 page["deletion_page_url"] = absolute_url
                 validated_pages.append(page)
             else:
@@ -587,15 +552,7 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
 
-            # Extract all hrefs to prevent hallucination
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            deletion_output = await self.extract_data_deletion_url_from_page(html, url, valid_hrefs)
+            deletion_output = await self.extract_data_deletion_url_from_page(html, url)
 
             # Calculate keyword bonus for each found page
             if user_keywords and deletion_output.get("deletion_pages"):
@@ -620,6 +577,7 @@ class PrivacyAnalyzer:
         'site_url' should be the URL of the main privacy policy page.
         """
         page = None
+        all_found_pages = []  # Inizializza la lista qui
         try:
             logger.info(f"Starting data deletion page search for: {site_url}")
             
@@ -627,21 +585,10 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             html_content = await page.content()
 
-            # Extract all hrefs to prevent hallucination
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
+            # --- 1. Analizza la pagina iniziale ---
+            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url)
 
-            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url, valid_hrefs)
-
-            all_found_pages = []
-
-            # Process initial findings
             if initial_output.get("deletion_pages"):
-                # Apply keyword bonus to initial findings
                 if user_keywords:
                     html_lower = html_content.lower()
                     for page_result in initial_output["deletion_pages"]:
@@ -652,38 +599,39 @@ class PrivacyAnalyzer:
                         page_result['keyword_bonus'] = keyword_bonus
                 all_found_pages.extend(initial_output["deletion_pages"])
 
-            # If no links found on the initial page, start the fan-out search
-            if not all_found_pages:
-                logger.info("Data deletion page not found on main page. Starting fan-out search.")
+            # --- 2. Esegui SEMPRE la ricerca "Fan-Out" ---
+            # (Rimuoviamo 'if not all_found_pages:')
+            logger.info("Always starting fan-out search for additional candidates...")
+            
+            internal_links = await self._get_internal_links(page, site_url)
+            
+            promising_keywords = [
+                'delete', 'erasure', 'clear',
+                'manage', 'control', 'dashboard', 'privacy', 'account' # Aggiunto 'account'
+            ]
+            promising_links = [
+                link for link in internal_links 
+                if any(keyword in link.lower() for keyword in promising_keywords)
+            ]
+            
+            search_tasks = []
+            for i, link in enumerate(promising_links):
+                if i >= self.max_hops:
+                    logger.warning(f"Reached max_hops limit ({self.max_hops}).")
+                    break
                 
-                internal_links = await self._get_internal_links(page, site_url)
-                
-                promising_keywords = [
-                    'delete', 'erasure', 'clear',
-                    'manage', 'control', 'dashboard', 'privacy'
-                ]
-                promising_links = [
-                    link for link in internal_links 
-                    if any(keyword in link.lower() for keyword in promising_keywords) and self._is_valid_html_url(link)
-                ]
-                
-                search_tasks = []
-                for i, link in enumerate(promising_links):
-                    if i >= self.max_hops:
-                        logger.warning(f"Reached max_hops limit ({self.max_hops}).")
-                        break
-                    
+                if await self._is_url_valid(link):
                     task_page = await browser.new_page()
                     task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
                     search_tasks.append(task)
-                
-                if search_tasks:
-                    results_from_fan_out = await asyncio.gather(*search_tasks)
-                    for result in results_from_fan_out:
-                        if result and result.get("deletion_pages"):
-                            all_found_pages.extend(result["deletion_pages"])
+            
+            if search_tasks:
+                results_from_fan_out = await asyncio.gather(*search_tasks)
+                for result in results_from_fan_out:
+                    if result and result.get("deletion_pages"):
+                        all_found_pages.extend(result["deletion_pages"])
 
-            # After collecting all pages, find the best one
+            # --- 3. Scegli il migliore tra TUTTI i risultati ---
             if all_found_pages:
                 def calculate_hybrid_score(page_result):
                     confidence = page_result.get('confidence_score', 0.0)
@@ -699,7 +647,7 @@ class PrivacyAnalyzer:
 
             logger.info("No data deletion page found after deep search.")
             await page.close()
-            return {} # Return an empty dict if nothing is found
+            return {"reasoning": "No data deletion page found after deep search.", "source_url": site_url}
 
         except Exception as e:
             logger.error(f"Error during data deletion page search for {site_url}: {e}")
@@ -715,10 +663,10 @@ class PrivacyAnalyzer:
         dpo_prompt = f"""
         You are an expert in GDPR compliance and a pure text extractor.
 
-        **STRICT RULE:** You MUST only use the text provided in the HTML content below. Do not use any external knowledge or web search. Your task is to extract information ONLY from the provided text.
+        STRICT RULE: You MUST only use the text provided in the HTML content below. Do not use any external knowledge or web search. Your task is to extract information ONLY from the provided text.
 
-        **Primary Goal:** Find the best email address for the DPO. Search for emails containing 'dpo@', 'privacy@', or 'legal@'.
-        **Secondary Goal:** Find any main postal address for the DPO.
+        Primary Goal: Find the best email address for the DPO. Search for emails containing 'dpo@', 'privacy@', or 'legal@'.
+        Secondary Goal: Find any main postal address for the DPO.
 
         The URL of the page being analyzed is: {url}
 
@@ -826,9 +774,10 @@ class PrivacyAnalyzer:
                         logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
                         break
                     
-                    task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_dpo_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
-                    dpo_search_tasks.append(task)
+                    if await self._is_url_valid(link):
+                        task_page = await browser.new_page()
+                        task = asyncio.create_task(self._analyze_dpo_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
+                        dpo_search_tasks.append(task)
                 
                 if dpo_search_tasks:
                     found_from_fan_out = await asyncio.gather(*dpo_search_tasks)
@@ -898,15 +847,3 @@ class PrivacyAnalyzer:
                 logger.error(f"Found a non-string link: {link} of type {type(link)}")
 
         return list(set(links)) # Return unique links
-
-    def _is_valid_html_url(self, url: str) -> bool:
-        """
-        Checks if a URL is likely an HTML page and not a script or asset file.
-        """
-        if not url:
-            return False
-        # Common file extensions that are not HTML pages
-        excluded_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.xml', '.json', '.zip', '.rar', '.tar', '.gz', '.svg', '.ico')
-        if url.lower().endswith(excluded_extensions):
-            return False
-        return True
