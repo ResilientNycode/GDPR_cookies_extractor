@@ -842,11 +842,15 @@ class PrivacyAnalyzer:
         links = []
         base_netloc = urlparse(site_url).netloc
         
+        parsed_site_url = urlparse(site_url)
+        base_url = f"{parsed_site_url.scheme}://{parsed_site_url.netloc}"
+
         for a in await page.query_selector_all('a'):
             try:
                 href = await a.get_attribute('href')
                 if href:
-                    full_url = urljoin(site_url, href)
+                    # Use the base_url for resolution, not the full site_url
+                    full_url = urljoin(base_url, href)
                     if urlparse(full_url).netloc == base_netloc and '#' not in full_url and not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf')):
                         links.append(full_url)
             except Exception as e:
