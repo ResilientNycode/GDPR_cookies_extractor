@@ -230,15 +230,16 @@ class PrivacyAnalyzer:
         You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings. This can be a separate page OR a section on the current page.
 
         CRITICAL RULES:
-        1. You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
+        1. You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL. If you cannot find a link that is clearly and explicitly about cookies or data technologies, return an empty list.
         2. The URL must point to an informational HTML page or a section within the current page.
 
         SEARCH STRATEGY:
-        1.  First, check if the current page contains a specific section about cookies. Look for `<a>` tags where the `href` attribute starts with a `#` (an anchor link). If you find an anchor link pointing to a section with a title like "Cookies and similar technologies", "How we use cookies", etc., prioritize this.
+        1.  First, check if the current page contains a specific section about cookies. Look for `<a>` tags where the `href` attribute starts with a `#` (an anchor link). If you find an anchor link pointing to a section with a title like "Cookies and similar technologies", "How we use cookies", etc., prioritize this. A link with the anchor text `maincookiessimilartechnologiesmodule` is a very strong candidate.
         2.  If no relevant section is found on the current page, look for links to separate pages. Give high priority to links where the clickable text (anchor text) contains phrases like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', 'Manage Cookies', or 'About Cookies'.
-        3.  Also, look for links within or near text that discusses cookie usage. Search the HTML for keywords like "How we use cookies", "Functionality", "Security", "Analytics", "Advertising", and "Technologies". A link found near these keywords is a very strong candidate.
-        4.  As a lower priority, consider links where the `href` attribute itself contains the word 'cookie' or 'technologies'.
-        5.  Analyze the context around the link. Links inside lists (`<ul>`, `<ol>`) or near headings (`<h2>`, `<h3>`) related to "Privacy" or "Cookies" are also good candidates.
+        3.  A link with the text 'Technologies' is a very strong candidate, as cookie details are often found there. For example, a link like `https://policies.google.com/technologies/cookies` is a perfect match.
+        4.  Also, look for links within or near text that discusses cookie usage. Search the HTML for keywords like "How we use cookies", "Functionality", "Security", "Analytics", "Advertising", and "Technologies". A link found near these keywords is a very strong candidate.
+        5.  As a lower priority, consider links where the `href` attribute itself contains the word 'cookie' or 'technologies'.
+        6.  Analyze the context around the link. Links inside lists (`<ul>`, `<ol>`) or near headings (`<h2>`, `<h3>`) related to "Privacy" or "Cookies" are also good candidates.
 
         The HTML content to analyze is below:
         ---
@@ -860,6 +861,12 @@ class PrivacyAnalyzer:
         """
         Helper to extract all internal links from a page, including subdomains.
         """
+        # Wait for network to be idle to ensure dynamic links are loaded
+        try:
+            await page.wait_for_load_state('networkidle', timeout=5000)
+        except Exception as e:
+            logger.warning(f"Timeout waiting for network idle, proceeding anyway: {e}")
+
         links = []
         base_netloc = urlparse(site_url).netloc
         
