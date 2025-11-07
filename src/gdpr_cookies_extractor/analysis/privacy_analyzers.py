@@ -284,7 +284,28 @@ class PrivacyAnalyzer:
         validated_declarations = []
         for decl in declarations:
             llm_returned_url = decl.get("cookie_declaration_url")
-            if llm_returned_url in valid_hrefs and self._is_valid_html_url(llm_returned_url):
+            
+            # New validation logic to accept anchor links on the current page
+            is_valid = False
+            if llm_returned_url:
+                # Case 1: The returned URL is exactly one of the hrefs found on the page.
+                if llm_returned_url in valid_hrefs:
+                    is_valid = True
+                # Case 2: The returned URL is a full URL with an anchor pointing to the current page.
+                else:
+                    try:
+                        parsed_llm_url = urlparse(llm_returned_url)
+                        parsed_current_url = urlparse(url)
+                        # Check if it's an anchor link for the current page
+                        if (parsed_llm_url.fragment and
+                            parsed_llm_url.scheme == parsed_current_url.scheme and
+                            parsed_llm_url.netloc == parsed_current_url.netloc and
+                            parsed_llm_url.path.rstrip('/') == parsed_current_url.path.rstrip('/')):
+                            is_valid = True
+                    except ValueError:
+                        is_valid = False # Invalid URL format
+
+            if is_valid and self._is_valid_html_url(llm_returned_url):
                 absolute_url = urljoin(url, llm_returned_url)
                 decl["cookie_declaration_url"] = absolute_url
                 validated_declarations.append(decl)
@@ -837,11 +858,18 @@ class PrivacyAnalyzer:
     # --- Generic Utility Methods ---
     async def _get_internal_links(self, page, site_url: str) -> List[str]:
         """
-        Helper to extract all internal links from a page.
+        Helper to extract all internal links from a page, including subdomains.
         """
         links = []
         base_netloc = urlparse(site_url).netloc
         
+        # Determine the main domain to allow for subdomains (e.g., get 'google.com' from 'www.google.com')
+        domain_parts = base_netloc.split('.')
+        if len(domain_parts) > 2:
+            main_domain = '.'.join(domain_parts[-2:])
+        else:
+            main_domain = base_netloc
+
         parsed_site_url = urlparse(site_url)
         base_url = f"{parsed_site_url.scheme}://{parsed_site_url.netloc}"
 
@@ -849,9 +877,11 @@ class PrivacyAnalyzer:
             try:
                 href = await a.get_attribute('href')
                 if href:
-                    # Use the base_url for resolution, not the full site_url
                     full_url = urljoin(base_url, href)
-                    if urlparse(full_url).netloc == base_netloc and '#' not in full_url and not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf')):
+                    parsed_full_url = urlparse(full_url)
+                    
+                    # Check if the link belongs to the same main domain (allowing subdomains)
+                    if parsed_full_url.netloc.endswith(main_domain) and '#' not in full_url and not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf')):
                         links.append(full_url)
             except Exception as e:
                 logger.error(f"Could not process link: {e}")
