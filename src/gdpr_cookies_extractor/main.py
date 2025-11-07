@@ -28,14 +28,14 @@ def sanitize_filename(url: str) -> str:
     sanitized = re.sub(r'[\\/*?:"<>|]', "_", parsed_url.netloc)
     return sanitized
 
-async def dump_html_content(current_url: str, scenario: str, browser, timestamp: str):
+async def dump_html_content(page, scenario: str, timestamp: str):
     """Dumps the HTML content of the current page."""
+    current_url = page.url
     sanitized_url = sanitize_filename(current_url)
     dump_dir = f"output/dumps/analysis_results_{timestamp}"
     os.makedirs(dump_dir, exist_ok=True)
     
     try:
-        page = browser.pages[-1] # Get the last active page
         html_content = await page.content()
         dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_page.html"
         with open(dump_path, "w", encoding="utf-8") as f:
@@ -94,7 +94,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         else:
             logger.warning(f"Could not find privacy policy for {current_url}. Skipping secondary analysis.")
 
-        await dump_html_content(current_url, scenario, browser, timestamp)
+        await dump_html_content(page, scenario, timestamp)
 
         return SiteAnalysisResult(
             website_url=current_url,
