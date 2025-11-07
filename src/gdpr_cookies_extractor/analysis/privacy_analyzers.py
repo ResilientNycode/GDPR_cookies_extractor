@@ -4,6 +4,7 @@ from urllib.parse import urljoin, urlparse
 from typing import Dict, Any, List
 from .llm_interface import AbstractLLMClient, LLMResponse 
 import asyncio
+import httpx
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,72 @@ class PrivacyAnalyzer:
         self.llm_client = llm_client
         self.max_hops = max_hops
         logger.info(f"PrivacyAnalyzer initialized with client: {type(llm_client).__name__} and max_hops: {max_hops}")
+
+    async def _analyze_links_for_target(self, links: List[str], search_goal: str, url: str) -> List[Dict[str, Any]]:
+        """
+        Uses the LLM to analyze a list of URLs and identify the most promising ones for a given search goal.
+        """
+        links_json = json.dumps(links, indent=2)
+        prompt = f"""
+        You are an expert web intelligence agent. Your task is to analyze a list of URLs and identify which ones are most likely to lead to a page that fulfills a specific goal.
+
+        **SEARCH GOAL:**
+        {search_goal}
+
+        **CONTEXT:**
+        You are currently on the page: {url}
+        You have extracted the following list of links from this page.
+
+        **LIST OF LINKS TO ANALYZE:**
+        ---
+        {links_json}
+        ---
+
+        **INSTRUCTIONS:**
+        1.  Review each link in the list.
+        2.  Based on the URL text and the search goal, decide how likely it is that the link points to the correct page.
+        3.  Return a JSON object containing a single key, "promising_links".
+        4.  The value of "promising_links" should be a list of objects, where each object represents a promising link and has the following structure:
+            {{
+              "url": <string>,
+              "reasoning": <string>,
+              "confidence_score": <number>
+            }}
+        5.  Only include links that you believe are relevant to the search goal. If no links seem promising, return an empty list.
+        6.  The "url" MUST be an exact URL from the provided list.
+        7.  The "confidence_score" should be from 0.0 to 1.0.
+
+        **EXAMPLE for a search goal of "Find the contact page":**
+        {{
+          "promising_links": [
+            {{
+              "url": "https://example.com/contact-us",
+              "reasoning": "The URL contains the words 'contact-us', which directly matches the search goal.",
+              "confidence_score": 0.9
+            }},
+            {{
+              "url": "https://example.com/about/team",
+              "reasoning": "The 'about/team' page might contain contact information, but it's less direct.",
+              "confidence_score": 0.6
+            }}
+          ]
+        }}
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+
+        if not response.success:
+            logger.error(f"Link analysis failed for goal '{search_goal}': {response.error}")
+            return []
+        
+        # Basic validation to ensure the LLM isn't hallucinating links
+        validated_links = []
+        for link_info in response.data.get("promising_links", []):
+            if link_info.get("url") in links:
+                validated_links.append(link_info)
+            else:
+                logger.warning(f"LLM returned a hallucinated link '{link_info.get('url')}' not in the original list. Discarding.")
+
+        return validated_links
 
     # --- Privacy Policy Methods ---
     async def _extract_policy_url_from_html(self, html_content: str, url: str):
@@ -221,34 +288,28 @@ class PrivacyAnalyzer:
             
         return response.data
 
-    async def _extract_cookie_declaration_url_from_html(self, html_content: str, url: str, valid_hrefs: List[str]):
+    async def _extract_cookie_declaration_url_from_html(self, html_content: str, url: str):
         """
         Analyzes the HTML of a given page to find the cookie declaration page URL.
         """
-        valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings. This can be a separate page OR a section on the current page.
+        You are an expert web analysis agent specializing in GDPR compliance. Your task is to find the URL of the human-readable cookie declaration, cookie policy, or cookie settings from the provided HTML content. This can be a separate page OR a section on the current page.
 
         CRITICAL RULES:
-        1. You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL. If you cannot find a link that is clearly and explicitly about cookies or data technologies, return an empty list.
-        2. The URL must point to an informational HTML page or a section within the current page.
+        1.  Your primary goal is to find the *exact* URL from an `href` attribute in an `<a>` tag.
+        2.  Do NOT invent or guess any URL. If you cannot find a link that is clearly and explicitly about cookies or data technologies, return an empty list.
+        3.  The URL must point to an informational HTML page or a section within the current page (e.g., starting with '#'). Do not extract links to scripts or images.
 
         SEARCH STRATEGY:
-        1.  First, check if the current page contains a specific section about cookies. Look for `<a>` tags where the `href` attribute starts with a `#` (an anchor link). If you find an anchor link pointing to a section with a title like "Cookies and similar technologies", "How we use cookies", etc., prioritize this. A link with the anchor text `maincookiessimilartechnologiesmodule` is a very strong candidate.
+        1.  First, check if the current page contains a specific section about cookies. Look for `<a>` tags where the `href` attribute starts with a `#` (an anchor link). If you find an anchor link pointing to a section with a title like "Cookies and similar technologies", "How we use cookies", etc., prioritize this.
         2.  If no relevant section is found on the current page, look for links to separate pages. Give high priority to links where the clickable text (anchor text) contains phrases like 'Cookie Policy', 'Cookie Statement', 'Cookie Settings', 'Manage Cookies', or 'About Cookies'.
         3.  A link with the text 'Technologies' is a very strong candidate, as cookie details are often found there. For example, a link like `https://policies.google.com/technologies/cookies` is a perfect match.
         4.  Also, look for links within or near text that discusses cookie usage. Search the HTML for keywords like "How we use cookies", "Functionality", "Security", "Analytics", "Advertising", and "Technologies". A link found near these keywords is a very strong candidate.
         5.  As a lower priority, consider links where the `href` attribute itself contains the word 'cookie' or 'technologies'.
-        6.  Analyze the context around the link. Links inside lists (`<ul>`, `<ol>`) or near headings (`<h2>`, `<h3>`) related to "Privacy" or "Cookies" are also good candidates.
 
         The HTML content to analyze is below:
         ---
         {html_content}
-        ---
-
-        A list of all valid links found in the page is provided here. You MUST choose from this list:
-        ---
-        {valid_hrefs_json}
         ---
         
         The base URL of the page is: {url}
@@ -265,12 +326,12 @@ class PrivacyAnalyzer:
         }}
 
         INSTRUCTIONS FOR JSON FIELDS:
-        - "cookie_declaration_url": The URL to the page or the URL with an anchor to the section (e.g., "https://example.com/privacy#cookies"). IT MUST BE A URL FROM THE `valid_links` LIST.
+        - "cookie_declaration_url": The exact URL found in the `href` attribute. This can be a relative path (e.g., "/cookies") or a full URL.
         - "reasoning": Briefly explain which keywords (in the link text or surrounding text) and context led you to this choice.
         - "confidence_score": From 0.0 to 1.0, how certain you are.
         - "source_section": The anchor text (the clickable text) of the link you found.
         
-        If you find no relevant links in the provided list, return an empty list: {{"cookie_declarations": []}}.
+        If you find no relevant links, return an empty list: {{"cookie_declarations": []}}.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -286,32 +347,19 @@ class PrivacyAnalyzer:
         for decl in declarations:
             llm_returned_url = decl.get("cookie_declaration_url")
             
-            # New validation logic to accept anchor links on the current page
-            is_valid = False
-            if llm_returned_url:
-                # Case 1: The returned URL is exactly one of the hrefs found on the page.
-                if llm_returned_url in valid_hrefs:
-                    is_valid = True
-                # Case 2: The returned URL is a full URL with an anchor pointing to the current page.
-                else:
-                    try:
-                        parsed_llm_url = urlparse(llm_returned_url)
-                        parsed_current_url = urlparse(url)
-                        # Check if it's an anchor link for the current page
-                        if (parsed_llm_url.fragment and
-                            parsed_llm_url.scheme == parsed_current_url.scheme and
-                            parsed_llm_url.netloc == parsed_current_url.netloc and
-                            parsed_llm_url.path.rstrip('/') == parsed_current_url.path.rstrip('/')):
-                            is_valid = True
-                    except ValueError:
-                        is_valid = False # Invalid URL format
+            if not llm_returned_url:
+                logger.warning("LLM returned a declaration entry with no URL. Skipping.")
+                continue
 
-            if is_valid and self._is_valid_html_url(llm_returned_url):
-                absolute_url = urljoin(url, llm_returned_url)
-                decl["cookie_declaration_url"] = absolute_url
+            # The LLM now returns relative or absolute paths. We must resolve them.
+            absolute_url = urljoin(url, llm_returned_url)
+            decl["cookie_declaration_url"] = absolute_url
+            
+            # We still validate the final, absolute URL.
+            if await self._is_valid_html_url(absolute_url):
                 validated_declarations.append(decl)
             else:
-                logger.warning(f"LLM returned a hallucinated or invalid URL for cookie declaration: {llm_returned_url}. Filtering it out.")
+                logger.warning(f"LLM returned a URL that failed validation: {absolute_url}. Filtering it out.")
 
         response.data["cookie_declarations"] = validated_declarations
         return response.data
@@ -325,14 +373,7 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
 
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url, valid_hrefs)
+            cookie_decl_output = await self._extract_cookie_declaration_url_from_html(html, url)
 
             # Calculate keyword bonus
             if user_keywords and cookie_decl_output.get("cookie_declarations"):
@@ -363,14 +404,7 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             initial_html = await page.content()
 
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url, valid_hrefs)
+            initial_llm_output = await self._extract_cookie_declaration_url_from_html(initial_html, site_url)
 
             if initial_llm_output.get("cookie_declarations"):
                 if user_keywords:
@@ -383,34 +417,38 @@ class PrivacyAnalyzer:
                         decl['keyword_bonus'] = keyword_bonus
                 all_found_declarations.extend(initial_llm_output["cookie_declarations"])
 
-            logger.info("Starting fan-out search for additional cookie declaration candidates...")
-            internal_links = await self._get_internal_links(page, site_url)
-
-            promising_keywords = ['cookie', 'technologies', 'legal', 'privacy', 'imprint']
-            promising_links = [
-                link for link in internal_links
-                if any(keyword in link.lower() for keyword in promising_keywords)
-            ]
-
-            search_tasks = []
-            for i, link in enumerate(promising_links):
-                if i >= self.max_hops:
-                    logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
-                    break
+            # If no declarations found on the initial page, start the intelligent fan-out search
+            if not all_found_declarations:
+                logger.info("Cookie declaration not found on main page. Starting intelligent fan-out search...")
+                internal_links = await self._get_internal_links(page, site_url)
                 
-                task_page = await browser.new_page()
-                task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
-                search_tasks.append(task)
+                if internal_links:
+                    search_goal = "Find the page with the cookie declaration, cookie policy, or information on data technologies used."
+                    promising_links_info = await self._analyze_links_for_target(internal_links, search_goal, site_url)
+                    
+                    # Sort by confidence and take the top N, respecting max_hops
+                    promising_links_info.sort(key=lambda x: x.get('confidence_score', 0.0), reverse=True)
+                    
+                    search_tasks = []
+                    for i, link_info in enumerate(promising_links_info):
+                        if i >= self.max_hops:
+                            logger.warning(f"Reached max_hops limit ({self.max_hops}). Not all promising links will be checked.")
+                            break
+                        
+                        link_url = link_info.get("url")
+                        task_page = await browser.new_page()
+                        task = asyncio.create_task(self._analyze_cookie_declaration_sub_page_for_fan_out(task_page, link_url, i + 1, user_keywords))
+                        search_tasks.append(task)
 
-            if search_tasks:
-                found_from_fan_out = await asyncio.gather(*search_tasks)
-                for result in found_from_fan_out:
-                    if result and result.get("cookie_declarations"):
-                        all_found_declarations.extend(result["cookie_declarations"])
+                    if search_tasks:
+                        found_from_fan_out = await asyncio.gather(*search_tasks)
+                        for result in found_from_fan_out:
+                            if result and result.get("cookie_declarations"):
+                                all_found_declarations.extend(result["cookie_declarations"])
 
             if all_found_declarations:
                 def calculate_hybrid_score(declaration):
-                    confidence = declaration.get('confidence_score', 0.0)
+                    confidence = declaration.get('confidence', 0.0)
                     bonus = declaration.get('keyword_bonus', 0.0)
                     return (0.7 * confidence) + (0.3 * bonus)
 
@@ -506,34 +544,29 @@ class PrivacyAnalyzer:
             return {"reasoning": f"Failed during privacy page analysis: {e}", "source_url": policy_url}
 
     # --- Data Deletion Methods ---
-    async def extract_data_deletion_url_from_page(self, html_content: str, url: str, valid_hrefs: List[str]):
+    async def extract_data_deletion_url_from_page(self, html_content: str, url: str):
         """
         Analyzes the HTML of a given page to find potential URLs for data deletion/management.
         Returns a list of candidate pages.
         """
-        valid_hrefs_json = json.dumps(valid_hrefs)
         prompt = f"""
-        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) where a user can delete their personal data or their entire account.
+        You are an expert in GDPR and web analysis. Your task is to find all links (URLs) in the provided HTML where a user can delete their personal data or their entire account.
 
-        CRITICAL RULE: You MUST only choose from the `valid_links` list provided below. Do not invent or guess any URL.
+        CRITICAL RULES:
+        1.  Your primary goal is to find the *exact* URL from an `href` attribute in an `<a>` tag.
+        2.  Do NOT invent or guess any URL. If you cannot find a link that is clearly and explicitly for data/account deletion, return an empty list.
+        3.  You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing.
 
         SEARCH STRATEGY & PRIORITIES:
         1.  Highest Priority: Look for links related to deleting an account or services. The anchor text or URL should contain keywords like 'delete your account', 'close your account', 'delete services'. This is the most important goal.
         2.  Medium Priority: Look for links related to a central privacy dashboard or data management center. Keywords include 'privacy dashboard', 'manage your data', 'my account privacy'.
         3.  Lower Priority: Look for links related to managing activity controls or clearing specific data types (like search history). Keywords include 'activity controls', 'manage activity', 'clear data'.
 
-        You MUST IGNORE links related ONLY to "cookies", "advertising", "ads", or "opt-out" of marketing.
-
         The URL of the page being analyzed is: {url}
 
         HTML content to analyze:
         ---
         {html_content}
-        ---
-
-        A list of all valid links found in the page is provided here. You MUST choose from this list:
-        ---
-        {valid_hrefs_json}
         ---
 
         You MUST return a single JSON object and nothing else. Do not include any text or explanation.
@@ -547,12 +580,12 @@ class PrivacyAnalyzer:
           "source_url": "{url}"
         }}
 
-        - "deletion_page_url": The URL that leads to the data management/deletion page. IT MUST BE A URL FROM THE `valid_links` LIST.
+        - "deletion_page_url": The exact URL found in the `href` attribute. This can be a relative path or a full URL.
         - "reasoning": Briefly explain what keywords or hints led you to that URL.
         - "confidence_score": A score from 0.0 to 1.0 on your certainty, following the priority guidelines.
         - "source_section": The anchor text (the clickable text) of the link you found.
         
-        If you find no relevant links in the provided list, return an empty list: {{"deletion_pages": []}}.
+        If you find no relevant links, return an empty list: {{"deletion_pages": []}}.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
@@ -565,15 +598,20 @@ class PrivacyAnalyzer:
         
         pages = response.data.get("deletion_pages", [])
         validated_pages = []
-        for page in pages:
-            llm_returned_url = page.get("deletion_page_url")
-            # Final validation: ensure the returned URL is in the original list of hrefs
-            if llm_returned_url in valid_hrefs and self._is_valid_html_url(llm_returned_url):
-                absolute_url = urljoin(url, llm_returned_url)
-                page["deletion_page_url"] = absolute_url
-                validated_pages.append(page)
+        for page_data in pages:
+            llm_returned_url = page_data.get("deletion_page_url")
+            
+            if not llm_returned_url:
+                logger.warning("LLM returned a deletion page entry with no URL. Skipping.")
+                continue
+
+            absolute_url = urljoin(url, llm_returned_url)
+            page_data["deletion_page_url"] = absolute_url
+
+            if await self._is_valid_html_url(absolute_url):
+                validated_pages.append(page_data)
             else:
-                logger.warning(f"LLM returned a hallucinated or invalid URL: {llm_returned_url}. Filtering it out.")
+                logger.warning(f"LLM returned a URL that failed validation: {absolute_url}. Filtering it out.")
 
         response.data["deletion_pages"] = validated_pages
         return response.data
@@ -587,15 +625,7 @@ class PrivacyAnalyzer:
             await page.goto(url, timeout=60000)
             html = await page.content()
 
-            # Extract all hrefs to prevent hallucination
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            deletion_output = await self.extract_data_deletion_url_from_page(html, url, valid_hrefs)
+            deletion_output = await self.extract_data_deletion_url_from_page(html, url)
 
             # Calculate keyword bonus for each found page
             if user_keywords and deletion_output.get("deletion_pages"):
@@ -620,6 +650,7 @@ class PrivacyAnalyzer:
         'site_url' should be the URL of the main privacy policy page.
         """
         page = None
+        all_found_pages = []
         try:
             logger.info(f"Starting data deletion page search for: {site_url}")
             
@@ -627,17 +658,7 @@ class PrivacyAnalyzer:
             await page.goto(site_url, timeout=60000)
             html_content = await page.content()
 
-            # Extract all hrefs to prevent hallucination
-            links = await page.query_selector_all('a')
-            valid_hrefs = []
-            for link in links:
-                href = await link.get_attribute('href')
-                if href:
-                    valid_hrefs.append(href)
-
-            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url, valid_hrefs)
-
-            all_found_pages = []
+            initial_output = await self.extract_data_deletion_url_from_page(html_content, site_url)
 
             # Process initial findings
             if initial_output.get("deletion_pages"):
@@ -652,36 +673,33 @@ class PrivacyAnalyzer:
                         page_result['keyword_bonus'] = keyword_bonus
                 all_found_pages.extend(initial_output["deletion_pages"])
 
-            # If no links found on the initial page, start the fan-out search
+            # If no links found on the initial page, start the intelligent fan-out search
             if not all_found_pages:
-                logger.info("Data deletion page not found on main page. Starting fan-out search.")
-                
+                logger.info("Data deletion page not found on main page. Starting intelligent fan-out search.")
                 internal_links = await self._get_internal_links(page, site_url)
-                
-                promising_keywords = [
-                    'delete', 'erasure', 'clear',
-                    'manage', 'control', 'dashboard', 'privacy'
-                ]
-                promising_links = [
-                    link for link in internal_links 
-                    if any(keyword in link.lower() for keyword in promising_keywords) and self._is_valid_html_url(link)
-                ]
-                
-                search_tasks = []
-                for i, link in enumerate(promising_links):
-                    if i >= self.max_hops:
-                        logger.warning(f"Reached max_hops limit ({self.max_hops}).")
-                        break
+
+                if internal_links:
+                    search_goal = "Find the page where a user can request to have their personal data deleted or their account closed."
+                    promising_links_info = await self._analyze_links_for_target(internal_links, search_goal, site_url)
+
+                    promising_links_info.sort(key=lambda x: x.get('confidence_score', 0.0), reverse=True)
                     
-                    task_page = await browser.new_page()
-                    task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link, i + 1, user_keywords))
-                    search_tasks.append(task)
-                
-                if search_tasks:
-                    results_from_fan_out = await asyncio.gather(*search_tasks)
-                    for result in results_from_fan_out:
-                        if result and result.get("deletion_pages"):
-                            all_found_pages.extend(result["deletion_pages"])
+                    search_tasks = []
+                    for i, link_info in enumerate(promising_links_info):
+                        if i >= self.max_hops:
+                            logger.warning(f"Reached max_hops limit ({self.max_hops}).")
+                            break
+                        
+                        link_url = link_info.get("url")
+                        task_page = await browser.new_page()
+                        task = asyncio.create_task(self._analyze_deletion_sub_page_for_fan_out(task_page, link_url, i + 1, user_keywords))
+                        search_tasks.append(task)
+                    
+                    if search_tasks:
+                        results_from_fan_out = await asyncio.gather(*search_tasks)
+                        for result in results_from_fan_out:
+                            if result and result.get("deletion_pages"):
+                                all_found_pages.extend(result["deletion_pages"])
 
             # After collecting all pages, find the best one
             if all_found_pages:
@@ -899,14 +917,46 @@ class PrivacyAnalyzer:
 
         return list(set(links)) # Return unique links
 
-    def _is_valid_html_url(self, url: str) -> bool:
+    async def _is_valid_html_url(self, url: str) -> bool:
         """
-        Checks if a URL is likely an HTML page and not a script or asset file.
+        Checks if a URL is valid, returns a 2xx status code, and is an HTML page.
+        Uses a streaming GET request to avoid downloading the full content.
         """
         if not url:
             return False
-        # Common file extensions that are not HTML pages
-        excluded_extensions = ('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.xml', '.json', '.zip', '.rar', '.tar', '.gz', '.svg', '.ico')
+        
+        # Quickly rule out common non-HTML file extensions
+        excluded_extensions = (
+            '.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.xml', '.json', 
+            '.zip', '.rar', '.tar', '.gz', '.svg', '.ico', '.webp', '.mp4', '.mp3'
+        )
         if url.lower().endswith(excluded_extensions):
+            logger.debug(f"URL {url} excluded by file extension.")
             return False
-        return True
+
+        try:
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,image/apng,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'DNT': '1' # Do Not Track
+            }
+            async with httpx.AsyncClient() as client:
+                async with client.stream("GET", url, timeout=10, follow_redirects=True, headers=headers) as response:
+                    # Check for successful status code
+                    if response.status_code >= 400:
+                        logger.warning(f"URL validation failed for {url} with status code {response.status_code}.")
+                        return False
+                    
+                    # Check content-type to ensure it's likely an HTML page
+                    content_type = response.headers.get('content-type', '').lower()
+                    if 'text/html' not in content_type:
+                        logger.warning(f"URL {url} is not an HTML page (Content-Type: {content_type}).")
+                        return False
+                    
+                    logger.debug(f"URL {url} validated successfully.")
+                    return True
+        except (httpx.RequestError, httpx.TimeoutException) as e:
+            logger.warning(f"URL validation failed for {url}: {e}")
+            return False

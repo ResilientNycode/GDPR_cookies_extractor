@@ -27,7 +27,7 @@ def sanitize_filename(url: str) -> str:
     """Sanitizes a URL to be used as a valid filename."""
     parsed_url = urlparse(url)
     
-    sanitized = re.sub(r'[\/*?:"<>|]', "_", parsed_url.netloc)
+    sanitized = re.sub(r'[\\/*?:"<>|]', "_", parsed_url.netloc)
     return sanitized
 
 
@@ -126,19 +126,16 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 ))
                 
                 # Run tasks and gather results
-                # deletion_res  = await asyncio.gather(
-                #     deletion_page_task 
-                # )
-                cookie_decl_res, deletion_res, retention_res, dpo_res  = await asyncio.gather(
-                    cookie_declaration_task, deletion_page_task, retention_task, dpo_task, 
+                dpo_res, retention_res, cookie_decl_res, deletion_res = await asyncio.gather(
+                    dpo_task, retention_task, cookie_declaration_task, deletion_page_task
                 )
                 
                 # Collect results into the extensible dictionary
                 analyses_results = {
+                    "dpo": dpo_res,
+                    "retention": retention_res,
                     "cookie_declaration": cookie_decl_res,
                     "data_deletion": deletion_res,
-                    "retention": retention_res,
-                    "dpo": dpo_res,
                 }
 
             # Format Success Result ---
