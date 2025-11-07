@@ -3,7 +3,7 @@ import logging
 from urllib.parse import urljoin, urlparse
 from typing import Dict, Any, List, Callable, Coroutine
 from .llm_interface import AbstractLLMClient, LLMResponse
-from .analysis import scraper
+from . import scraper
 import asyncio
 import httpx
 
@@ -119,7 +119,7 @@ class PrivacyAnalyzer:
         
         if not response.success:
             logger.error(f"Cookie categorization failed: {response.error}")
-            return {{}}
+            return {}
             
         return response.data
 
@@ -164,7 +164,7 @@ class PrivacyAnalyzer:
             if not promising_links:
                 logger.warning(f"No promising links identified by the LLM on {start_url}. Falling back to all internal links.")
                 internal_links = await scraper.extract_links(page, start_url)
-                promising_links = [{{"url": link}} for link in internal_links]
+                promising_links = [{"url": link} for link in internal_links]
 
             candidate_urls = [link.get("url") for link in promising_links if link.get("url")]
             valid_urls_to_scan = await self._validate_candidate_links(candidate_urls)
@@ -194,11 +194,11 @@ class PrivacyAnalyzer:
                     return best_item
 
             logger.info(f"No item for '{result_key}' found after deep search.")
-            return {{"reasoning": "No relevant information found after deep search.", result_key: None}}
+            return {"reasoning": "No relevant information found after deep search.", result_key: None}
 
         except Exception as e:
             logger.error(f"Error during '{result_key}' search for {start_url}: {e}", exc_info=True)
-            return {{"reasoning": f"Failed during search: {e}", result_key: None}}
+            return {"reasoning": f"Failed during search: {e}", result_key: None}
         finally:
             if page:
                 await page.close()
@@ -260,7 +260,7 @@ class PrivacyAnalyzer:
             if response.data.get("promising_links"):
                 for link in response.data["promising_links"]:
                     link["url"] = urljoin(url, link["url"])
-        return response.data if response.success else {{}}
+        return response.data if response.success else {}
 
     async def _extract_cookie_declaration_info(self, html_content: str, url: str) -> Dict[str, Any]:
         prompt = f"""
@@ -295,7 +295,7 @@ class PrivacyAnalyzer:
             if response.data.get("promising_links"):
                 for link in response.data["promising_links"]:
                     link["url"] = urljoin(url, link["url"])
-        return response.data if response.success else {{}}
+        return response.data if response.success else {}
 
     async def _extract_data_deletion_info(self, html_content: str, url: str) -> Dict[str, Any]:
         prompt = f"""
@@ -330,7 +330,7 @@ class PrivacyAnalyzer:
             if response.data.get("promising_links"):
                 for link in response.data["promising_links"]:
                     link["url"] = urljoin(url, link["url"])
-        return response.data if response.success else {{}}
+        return response.data if response.success else {}
 
     # --- UTILITY METHODS ---
 

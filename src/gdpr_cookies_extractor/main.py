@@ -157,7 +157,8 @@ async def main_async():
         sites_df = pd.DataFrame([{'website_url': sys.argv[1]}])
     else:
         try:
-            sites_df = pd.read_csv("sites.csv")
+            sites_df = pd.read_csv("sites.csv", header=None, names=['index_col', 'website_url'])
+            sites_df = sites_df.drop(columns=['index_col'])
         except FileNotFoundError:
             logger.error("'sites.csv' not found. Please create it or provide a URL as an argument.")
             return
