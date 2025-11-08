@@ -23,12 +23,16 @@ class PrivacyAnalyzer:
         Sends HTML content to the LLM to find the privacy policy URL on a single page.
         """
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
-        This page is often linked from the footer with a 'Privacy' word or similar. Notice that the cookie policy and the privacy policy could be on different url so be sure to return the privacy polcy and note the cookie policy.
-        Some promising links candidate for privacy page are passed: {promising_links} so start from there.  
-        Analyze the provided HTML content and find the most likely URL for the privacy policy.
-        Look for links containing keywords like 'privacy policy', 'GDPR', 'data protection', 'privacy center'.
+        You are an expert web analysis agent. Your task is to find the URL of the privacy policy page from the provided HTML content.
         
+        A pre-filtered list of candidate links has been provided: {promising_links}
+
+        **CRITICAL RULE: If the candidate link list is not empty, you MUST choose the best and most relevant option from that list.** 
+        Only search the full HTML content below if the candidate list is empty or contains no suitable links.
+        
+        When searching, look for links containing keywords like 'privacy policy', 'GDPR', 'data protection', 'privacy center'.
+        The privacy policy is often in the footer of the page. Note that the cookie policy and the privacy policy could be on different URLs, so be sure to return the main privacy policy.
+
         The HTML content to analyze is below:
         ---
         {html_content}
@@ -43,9 +47,9 @@ class PrivacyAnalyzer:
           "reasoning": <string>,
           "confidence_score": <number>
         }}
-        privacy_policy_url must be the complete URL to the privacy page. If no URL is found, set "privacy_policy_url" to null.
-        In the reasoning field explain what words or other hints you have choosen to pick that privacy_policy_url as privacy page or why you didn't find it.
-        In confidence_score field tell me from 0 to 1 how sure you are that the provided privacy_policy_url  is the correct one containing the privacy page.
+        - privacy_policy_url: Must be the complete and absolute URL to the privacy page. If no URL is found, this MUST be null.
+        - reasoning: Explain your choice or why you could not find a URL.
+        - confidence_score: A number from 0.0 to 1.0 indicating your certainty.
         """
         
         response = await self.llm_client.query_json(user_prompt=prompt)
