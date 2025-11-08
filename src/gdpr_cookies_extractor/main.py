@@ -87,15 +87,9 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             third_party_count = count_third_party_cookies(current_url, cookies)
 
             # Find Privacy Policy Page
-            logger.info("Extracting links for privay page with simple extractor tool...")
-            html_content = await page.content()
-            promising_privacy_page_links = simple_extractor(html_content)
-            logger.info(f"[{scenario}] Simple extractor found links: {promising_privacy_page_links}")
-
             llm_output = await analyzer.find_privacy_policy(
                 browser, current_url, 
-                filter_keywords=user_keywords_config.get('privacy_policy', []), 
-                promising_privacy_links=promising_privacy_page_links
+                filter_keywords=user_keywords_config.get('privacy_policy', []),
             )
 
 
