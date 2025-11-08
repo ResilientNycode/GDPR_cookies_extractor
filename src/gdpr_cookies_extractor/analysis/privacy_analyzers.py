@@ -153,7 +153,6 @@ class PrivacyAnalyzer:
             root_domain = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc
             
             # INITIAL ANALYSIS ---
-            # Use the worker function for the main site_url
             initial_page = await context.new_page()
             
             initial_result = await self._analyze_page_for_policy(
@@ -163,46 +162,6 @@ class PrivacyAnalyzer:
             if initial_result and initial_result.get("privacy_policy_url"):
                 found_policies.append(initial_result)
 
-            
-            # FAN-OUT SEARCH ---
-            # Only run fan-out if the initial page analysis failed
-            # if not initial_result.get("privacy_policy_url"):
-            if False:
-                logger.info("Policy not found on main page. Starting fan-out search...")
-                
-                
-                temp_page = await context.new_page()
-                promising_links = []
-                try:
-                    await temp_page.goto(site_url, timeout=60000)
-                    promising_links = await self._filter_internal_links(temp_page, site_url, filter_keywords)
-                    logger.debug(f"Interanl links found: {promising_links}")
-                except Exception as e:
-                    logger.error(f"Failed to get internal links for fan-out: {e}")
-                finally:
-                    await temp_page.close()
-
-                # Create parallel search tasks
-                search_tasks = []
-                for i, link in enumerate(promising_links):
-                    if i >= self.max_hops:
-                        logger.warning(f"Reached max_hops limit ({self.max_hops}).")
-                        break
-                    
-                    task_page = await context.new_page()
-                    task = asyncio.create_task(self._analyze_page_for_policy(
-                        task_page, link, i + 1, root_domain, filter_keywords
-                    ))
-                    search_tasks.append(task)
-                
-                # Collect results from fan-out
-                if search_tasks:
-                    found_from_fan_out = await asyncio.gather(*search_tasks)
-                    # Add valid results to our list
-                    found_policies.extend([
-                        p for p in found_from_fan_out 
-                        if p and p.get("privacy_policy_url")
-                    ])
 
             # FINAL SELECTION ---
             if found_policies:
@@ -294,6 +253,9 @@ class PrivacyAnalyzer:
             
         return response.data
 
+
+
+    ############################################################################### UTILITY FUNCTIONS ###############################################################################
 
     # --- Generic Utility Methods ---
     async def _filter_internal_links(self, page, site_url: str, filter_keywords: Optional[List[str]] = None) -> List[Dict[str, str]]:
