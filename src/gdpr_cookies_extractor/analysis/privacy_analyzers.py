@@ -24,10 +24,10 @@ class PrivacyAnalyzer:
         """
         prompt = f"""
         You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
-        This page is often linked from the footer with a 'Privacy' word or similar. Notice that the cookie policy and the privacy policy could be on different url so be sure to return the privacy polcy and note the cookie policy. 
+        This page is often linked from the footer with a 'Privacy' word or similar. Notice that the cookie policy and the privacy policy could be on different url so be sure to return the privacy polcy and note the cookie policy.
+        Some promising links candidate for privacy page are passed: {promising_links} so start from there.  
         Analyze the provided HTML content and find the most likely URL for the privacy policy.
         Look for links containing keywords like 'privacy policy', 'GDPR', 'data protection', 'privacy center'.
-        Some promising links candidate for privacy page are passed: {promising_links} so take first into account. 
         
         The HTML content to analyze is below:
         ---
@@ -73,7 +73,7 @@ class PrivacyAnalyzer:
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
             promising_links = await self._filter_internal_links(page, url, user_keywords)
-            logger.debug(f"Interanl links found: {promising_links}")
+            logger.debug(f"Internal links found: {promising_links}")
 
             # Check for external redirect after navigation
             final_netloc = urlparse(page.url).netloc
@@ -121,7 +121,7 @@ class PrivacyAnalyzer:
             if page:
                 await page.close()
 
-    async def find_privacy_policy(self, browser, site_url: str, filter_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def find_privacy_policy(self, context, site_url: str, filter_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         [ORCHESTRATOR FUNCTION]
         Orchestrates the search for the privacy policy URL.
@@ -140,7 +140,7 @@ class PrivacyAnalyzer:
             
             # INITIAL ANALYSIS ---
             # Use the worker function for the main site_url
-            initial_page = await browser.new_page()
+            initial_page = await context.new_page()
             
             initial_result = await self._analyze_page_for_policy(
                 initial_page, site_url, 0, root_domain, filter_keywords
@@ -157,7 +157,7 @@ class PrivacyAnalyzer:
                 logger.info("Policy not found on main page. Starting fan-out search...")
                 
                 
-                temp_page = await browser.new_page()
+                temp_page = await context.new_page()
                 promising_links = []
                 try:
                     await temp_page.goto(site_url, timeout=60000)
@@ -175,7 +175,7 @@ class PrivacyAnalyzer:
                         logger.warning(f"Reached max_hops limit ({self.max_hops}).")
                         break
                     
-                    task_page = await browser.new_page()
+                    task_page = await context.new_page()
                     task = asyncio.create_task(self._analyze_page_for_policy(
                         task_page, link, i + 1, root_domain, filter_keywords
                     ))
@@ -286,6 +286,7 @@ class PrivacyAnalyzer:
         """
         Helper to extract all internal links (including subdomains) from a page.
         """
+        logger.debug(f"filtering keywords: {filter_keywords}")
         links = []
         if filter_keywords is None:
             filter_keywords = []

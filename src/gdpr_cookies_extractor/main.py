@@ -14,7 +14,7 @@ from dataclasses import asdict
 # Import relativi (presupponendo la struttura del progetto)
 from .utils.logging_setup import *
 from .utils.cookie_helpers import simplify_cookies, count_third_party_cookies
-from .analysis.scraper import handle_cookie_banner, simple_extractor
+from .analysis.scraper import handle_cookie_banner
 from .analysis.ollama_providers import OllamaProvider
 from .analysis.privacy_analyzers import PrivacyAnalyzer
 from .analysis.llm_interface import AbstractLLMClient
@@ -31,7 +31,7 @@ def sanitize_filename(url: str) -> str:
     return sanitized
 
 
-async def dump_data(current_url: str, scenario: str, cookies: list, browser, full_privacy_policy_url: Optional[str], timestamp: str):
+async def dump_data(current_url: str, scenario: str, cookies: list, context, full_privacy_policy_url: Optional[str], timestamp: str):
     """Dumps cookies to a JSON file and the privacy policy to an HTML file."""
     sanitized_url = sanitize_filename(current_url)
     dump_dir = f"output/dumps/analysis_results_{timestamp}"
@@ -46,7 +46,7 @@ async def dump_data(current_url: str, scenario: str, cookies: list, browser, ful
     # Dump privacy policy
     if full_privacy_policy_url:
         try:
-            async with await browser.new_page() as policy_page:
+            async with await context.new_page() as policy_page:
                 await policy_page.goto(full_privacy_policy_url, wait_until="domcontentloaded", timeout=60000)
                 policy_html = await policy_page.content()
                 policy_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_privacy_policy.html"
@@ -57,14 +57,14 @@ async def dump_data(current_url: str, scenario: str, cookies: list, browser, ful
             logger.error(f"Failed to dump privacy policy for {full_privacy_policy_url}: {e}")
 
 
-async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
+async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
     Returns a SiteAnalysisResult object.
     """
     logger.info(f"Processing: {site_url} (Scenario: {scenario})")
     try:
-        async with await browser.new_page() as page:
+        async with await context.new_page() as page:
             # Navigation and Cookie Handling 
             await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
             await handle_cookie_banner(page, action=scenario)
@@ -78,7 +78,6 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             logger.info(f"[{scenario}] Captured {len(cookies)} cookies for {current_url}.")
 
             # Cookie Analysis ---
-            # logger.debug(f"Cookies content: {cookies}")
             simplified_cookies = simplify_cookies(cookies)
 
             logger.debug("Categorizing cookies...")
@@ -88,7 +87,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
 
             # Find Privacy Policy Page
             llm_output = await analyzer.find_privacy_policy(
-                browser, current_url, 
+                context, current_url, 
                 filter_keywords=search_keywords_config.get('privacy_policy', []),
             )
 
@@ -100,7 +99,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 policy_url_path = llm_output.get("privacy_policy_url")
                 full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
-            await dump_data(current_url, scenario, cookies, browser, full_privacy_policy_url, timestamp)
+            await dump_data(current_url, scenario, cookies, context, full_privacy_policy_url, timestamp)
             
             # Format Success Result ---
             return SiteAnalysisResult.from_outputs(
@@ -118,12 +117,11 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
 
-async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
+async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, context, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
     """
     Creates and runs all analysis tasks concurrently.
     """
     tasks = []
-    # scenarios = ["accept", "reject"]
     scenarios = ["accept"]
 
     for index, row in sites_df.iterrows():
@@ -134,7 +132,7 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
             
         for scenario in scenarios:
             tasks.append(
-                process_site_scenario(browser, analyzer, site_url, scenario, timestamp, search_keywords_config)
+                process_site_scenario(context, analyzer, site_url, scenario, timestamp, search_keywords_config)
             )
     
     results = await asyncio.gather(*tasks)
@@ -219,9 +217,15 @@ async def gdpr_analysis(sites_df):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch()
+        context = await browser.new_context(
+            locale='en-GB',
+            timezone_id='Europe/Rome',
+            geolocation={'latitude': 41.9028, 'longitude': 12.4964}
+        )
         
-        all_results = await run_all_analyses(sites_df, analyzer, browser, timestamp, search_keywords_config)
+        all_results = await run_all_analyses(sites_df, analyzer, context, timestamp, search_keywords_config)
         
+        await context.close()
         await browser.close()
     
     save_results(all_results, timestamp)
