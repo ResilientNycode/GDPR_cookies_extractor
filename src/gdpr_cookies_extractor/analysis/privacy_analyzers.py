@@ -138,7 +138,8 @@ class PrivacyAnalyzer:
                 promising_links = []
                 try:
                     await temp_page.goto(site_url, timeout=60000)
-                    promising_links = await self._filter_internal_links(temp_page, site_url, filter_keywords) 
+                    promising_links = await self._filter_internal_links(temp_page, site_url, filter_keywords)
+                    logger.debug(f"Interanl links found: {promising_links}")
                 except Exception as e:
                     logger.error(f"Failed to get internal links for fan-out: {e}")
                 finally:
