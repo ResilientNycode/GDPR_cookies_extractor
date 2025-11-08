@@ -201,6 +201,9 @@ class PrivacyAnalyzer:
         - "Why do we use cookies"
         - "Where do we use cookies?"
         - A table or detailed list of cookies.
+        - A categorization of cookies in categories like "Analytical", "Functional" and "Marketing. 
+
+        **CRITICAL RULE:** If the text only briefly mentions cookies, or refers to a separate "Cookie Policy" page without providing a detailed declaration on *this* page, you MUST set "has_cookie_declaration" to false. Only set it to true if a comprehensive, detailed declaration (including types, purposes, or a list/table of cookies) is present directly in the provided text.
 
         Analyze the text below:
         ---
@@ -225,9 +228,10 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, filter_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
         """
         Analyzes the given privacy policy page to see if it contains the cookie declaration.
+        If not found on the privacy policy page, it searches for a link to a separate cookie policy page.
         """
         if not privacy_policy_url:
             return {"cookie_declaration_url": None, "reasoning": "No privacy policy URL provided."}
@@ -238,12 +242,12 @@ class PrivacyAnalyzer:
             page = await context.new_page()
             await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
             
-            # Use evaluate to get the body's innerText, which is cleaner than page.content()
             page_content = await page.evaluate("document.body.innerText")
 
             if not page_content:
                 return {"cookie_declaration_url": None, "reasoning": "Page content was empty."}
 
+            # Step 1: Ask LLM if declaration is on THIS page
             llm_result = await self._ask_llm_about_cookie_declaration(page_content)
 
             if llm_result.get("has_cookie_declaration"):
@@ -253,10 +257,25 @@ class PrivacyAnalyzer:
                     "reasoning": llm_result.get('reasoning')
                 }
             else:
-                logger.info(f"No cookie declaration found on {privacy_policy_url}. Reason: {llm_result.get('reasoning')}")
+                logger.info(f"LLM did not find cookie declaration on {privacy_policy_url}. Reason: {llm_result.get('reasoning')}. Searching for a link to a separate cookie policy page.")
+                
+                # Step 2: If not found, search for a link to a separate cookie policy page
+                promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, search_keywords_config.get('cookie_declaration', []))
+                
+                if promising_links_objects:
+                    best_candidate_url = self._get_best_candidate(promising_links_objects, search_keywords_config.get('cookie_declaration', []))
+                    
+                    if best_candidate_url:
+                        logger.info(f"Found separate cookie declaration link: {best_candidate_url}")
+                        return {
+                            "cookie_declaration_url": best_candidate_url,
+                            "reasoning": f"Cookie declaration not found on privacy policy page, but a link to a separate page was found: {best_candidate_url}"
+                        }
+                
+                logger.info(f"No cookie declaration found on {privacy_policy_url} or linked pages.")
                 return {
                     "cookie_declaration_url": None,
-                    "reasoning": llm_result.get('reasoning')
+                    "reasoning": llm_result.get('reasoning') + " No suitable link to a separate cookie policy page was found."
                 }
 
         except Exception as e:
