@@ -225,7 +225,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_cookie_declaration_page(self, context, privacy_policy_url: str) -> Dict[str, Any]:
+    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, filter_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         Analyzes the given privacy policy page to see if it contains the cookie declaration.
         """

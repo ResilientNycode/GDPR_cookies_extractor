@@ -232,7 +232,8 @@ async def gdpr_analysis(sites_df):
         context = await browser.new_context(
             locale='en-GB',
             timezone_id='Europe/Rome',
-            geolocation={'latitude': 41.9028, 'longitude': 12.4964}
+            geolocation={ "longitude": 12.4964, "latitude": 41.9028 },
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"
         )
         
         all_results = await run_all_analyses(sites_df, analyzer, context, timestamp, search_keywords_config)
