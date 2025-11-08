@@ -58,7 +58,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, user_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         [WORKER FUNCTION]
         Analyzes a SINGLE page (URL) for a policy link and calculates a keyword bonus.
@@ -69,6 +69,18 @@ class PrivacyAnalyzer:
         try:
             logger.info(f"Analyzing page (Hop {hop_num}): {url}")
             await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+
+            # Check for external redirect after navigation
+            final_netloc = urlparse(page.url).netloc
+            if not (final_netloc == original_root_domain or final_netloc.endswith("." + original_root_domain)):
+                logger.warning(f"Redirected to external domain: {page.url}. Skipping analysis.")
+                return {
+                    "privacy_policy_url": None,
+                    "reasoning": f"Redirected to external domain {page.url}",
+                    "confidence_score": 0.0,
+                    "keyword_bonus": 0.0
+                }
+
             html = await page.content()
             html_lower = html.lower() # Store for bonus calculation
 
@@ -117,11 +129,15 @@ class PrivacyAnalyzer:
         try:
             logger.info(f"Starting privacy policy search for {site_url}...")
             
+            # Determine the root domain to check against redirects
+            base_netloc = urlparse(site_url).netloc
+            root_domain = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc
+            
             # INITIAL ANALYSIS ---
             # Use the worker function for the main site_url
             initial_page = await browser.new_page()
             initial_result = await self._analyze_page_for_policy(
-                initial_page, site_url, 0, filter_keywords
+                initial_page, site_url, 0, root_domain, filter_keywords
             )
             
             if initial_result and initial_result.get("privacy_policy_url"):
@@ -155,7 +171,7 @@ class PrivacyAnalyzer:
                     
                     task_page = await browser.new_page()
                     task = asyncio.create_task(self._analyze_page_for_policy(
-                        task_page, link, i + 1, filter_keywords
+                        task_page, link, i + 1, root_domain, filter_keywords
                     ))
                     search_tasks.append(task)
                 
