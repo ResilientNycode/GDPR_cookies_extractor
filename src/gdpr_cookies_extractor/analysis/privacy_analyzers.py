@@ -137,7 +137,10 @@ class PrivacyAnalyzer:
             # INITIAL ANALYSIS ---
             # Use the worker function for the main site_url
             initial_page = await browser.new_page()
+
             promising_links = await self._filter_internal_links(initial_page, site_url, filter_keywords)
+            logger.debug(f"Interanl links found: {promising_links}")
+            
             initial_result = await self._analyze_page_for_policy(
                 initial_page, site_url, 0, root_domain, filter_keywords, promising_links
             )
