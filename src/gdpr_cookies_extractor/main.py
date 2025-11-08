@@ -111,7 +111,6 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
                 third_party_count=third_party_count,
                 llm_output=llm_output,
                 privacy_policy_url=full_privacy_policy_url,
-                simple_extractor_links=promising_privacy_page_links,
                 **analyses_results
             )
 
