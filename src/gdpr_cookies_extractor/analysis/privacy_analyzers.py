@@ -66,16 +66,16 @@ class PrivacyAnalyzer:
     async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         [WORKER FUNCTION]
-        Analyzes a SINGLE page (URL) for a policy link and calculates a keyword bonus.
+        Analyzes a SINGLE page (URL) for a policy link, validates the LLM's choice, and calculates a keyword bonus.
         This is the atomic work unit for policy search.
-        It is responsible for closing its own page.
         """
         html_lower = ""
         try:
             logger.info(f"Analyzing page (Hop {hop_num}): {url}")
-            if not page.url == url: # Avoid unnecessary navigation if already on the page
+            if not page.url == url:
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
+            # Step 1: Get heuristic candidates first
             promising_links = await self._filter_internal_links(page, url, user_keywords)
             logger.debug(f"Internal links found: {promising_links}")
 
@@ -83,30 +83,44 @@ class PrivacyAnalyzer:
             final_netloc = urlparse(page.url).netloc
             if not (final_netloc == original_root_domain or final_netloc.endswith("." + original_root_domain)):
                 logger.warning(f"Redirected to external domain: {page.url}. Skipping analysis.")
-                return {
-                    "privacy_policy_url": None,
-                    "reasoning": f"Redirected to external domain {page.url}",
-                    "confidence_score": 0.0,
-                    "keyword_bonus": 0.0
-                }
+                return {"privacy_policy_url": None, "reasoning": f"Redirected to external domain {page.url}", "confidence_score": 0.0, "keyword_bonus": 0.0}
 
             html = await page.content()
-            html_lower = html.lower() # Store for bonus calculation
+            html_lower = html.lower()
 
-            # call LLM to extract policy URL from the HTML
+            # Step 2: Call LLM to get its best guess
             policy_output = await self._extract_policy_url_from_html(html, url, promising_links)
+            llm_url = policy_output.get("privacy_policy_url")
+            logger.debug(f"Returned choice from LLM: {llm_url}")
 
-            # calculate keyword bonus
-            # this bonus is based on finding keywords on the current page,
+            # Step 3: Validate the LLM's choice and apply heuristic override if needed
+            if promising_links and llm_url:
+                # Check if the LLM's choice is valid (i.e., it's one of the promising links)
+                is_llm_choice_valid = any(llm_url in link for link in promising_links)
+                
+                if not is_llm_choice_valid:
+                    logger.warning(f"LLM disobeyed prompt. Its choice '{llm_url}' was not in the candidate list. Applying heuristic fallback.")
+                    
+                    # Use the programmatic selector to get a better link
+                    heuristic_url = self._get_best_candidate(promising_links, user_keywords)
+                    
+                    if heuristic_url:
+                        logger.info(f"Heuristic override selected: '{heuristic_url}'")
+                        policy_output["privacy_policy_url"] = heuristic_url
+                        policy_output["reasoning"] = "LLM choice overridden by heuristic due to non-compliance. Selected best candidate from pre-filtered list."
+                        policy_output["confidence_score"] = 0.95 # High confidence in our heuristic
+                    else:
+                        logger.warning("Heuristic fallback found no suitable link either.")
+            
+            # Step 4: Calculate keyword bonus
             keyword_bonus = 0.0
-            if user_keywords:
-                if any(keyword.lower() in html_lower for keyword in user_keywords):
-                    logger.info(f"User keywords found on {url}, applying bonus.")
-                    keyword_bonus = 0.3 # Fixed bonus
+            if user_keywords and any(keyword.lower() in html_lower for keyword in user_keywords):
+                logger.info(f"User keywords found on {url}, applying bonus.")
+                keyword_bonus = 0.3
             
             policy_output['keyword_bonus'] = keyword_bonus
 
-            # ensure the found URL is absolute
+            # Step 5: Ensure the final URL is absolute
             found_url = policy_output.get("privacy_policy_url")
             if found_url:
                 policy_output["privacy_policy_url"] = urljoin(url, found_url)
@@ -115,12 +129,7 @@ class PrivacyAnalyzer:
         
         except Exception as e:
             logger.error(f"Error analyzing page {url}: {e}")
-            return {
-                "privacy_policy_url": None,
-                "reasoning": f"Failed to analyze page {url}: {e}",
-                "confidence_score": 0.0,
-                "keyword_bonus": 0.0
-            }
+            return {"privacy_policy_url": None, "reasoning": f"Failed to analyze page {url}: {e}", "confidence_score": 0.0, "keyword_bonus": 0.0}
         finally:
             if page:
                 await page.close()
@@ -328,5 +337,19 @@ class PrivacyAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not process link {href}: {e}")
 
-        return list(set(links)) # Return unique links
+        return list(set(links))
     
+    def _get_best_candidate(self, promising_links: List[str], keyword_priority_list: List[str]):
+        if not promising_links or not keyword_priority_list:
+            return None
+            
+        for keyword in keyword_priority_list:
+            
+            for link in promising_links:
+                required_words = keyword.lower().split()
+                link_lower = link.lower()
+                
+                if all(word in link_lower for word in required_words):
+                    return link
+
+        return None
