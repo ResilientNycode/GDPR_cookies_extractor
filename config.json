@@ -30,7 +30,12 @@
       "privacy center",
       "privacy"
     ],
-    "cookie_declaration": ["cookie", "technologies", "imprint"],
+    "cookie_declaration": [
+      "cookies policy",
+      "cookies and technologies",
+      "use cookies",
+      "technologies"
+    ],
     "data_deletion": ["delete", "erase", "clear", "manage", "dashboard"],
     "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
   }
