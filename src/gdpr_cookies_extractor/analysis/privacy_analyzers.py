@@ -17,7 +17,7 @@ class PrivacyAnalyzer:
         self.max_hops = max_hops
         logger.info(f"PrivacyAnalyzer initialized with client: {type(llm_client).__name__} and max_hops: {max_hops}")
 
-    async def _extract_policy_url_from_html(self, html_content: str, url: str):
+    async def _extract_policy_url_from_html(self, html_content: str, url: str, promising_links: List[str]):
     # --- Privacy Policy Methods ---
         """
         Sends HTML content to the LLM to find the privacy policy URL on a single page.
@@ -27,6 +27,7 @@ class PrivacyAnalyzer:
         This page is often linked from the footer with a 'Privacy' word or similar. Notice that the cookie policy and the privacy policy could be on different url so be sure to return the privacy polcy and note the cookie policy. 
         Analyze the provided HTML content and find the most likely URL for the privacy policy.
         Look for links containing keywords like 'privacy policy', 'GDPR', 'data protection', 'privacy center'.
+        Some promising links candidate for privacy page are passed: {promising_links} so take first into account. 
         
         The HTML content to analyze is below:
         ---
@@ -85,7 +86,7 @@ class PrivacyAnalyzer:
             html_lower = html.lower() # Store for bonus calculation
 
             # call LLM to extract policy URL from the HTML
-            policy_output = await self._extract_policy_url_from_html(html, url)
+            policy_output = await self._extract_policy_url_from_html(html, url, promising_links)
 
             # calculate keyword bonus
             # this bonus is based on finding keywords on the current page,
@@ -136,8 +137,9 @@ class PrivacyAnalyzer:
             # INITIAL ANALYSIS ---
             # Use the worker function for the main site_url
             initial_page = await browser.new_page()
+            promising_links = await self._filter_internal_links(initial_page, site_url, filter_keywords)
             initial_result = await self._analyze_page_for_policy(
-                initial_page, site_url, 0, root_domain, filter_keywords
+                initial_page, site_url, 0, root_domain, filter_keywords, promising_links
             )
             
             if initial_result and initial_result.get("privacy_policy_url"):
@@ -147,7 +149,7 @@ class PrivacyAnalyzer:
             # FAN-OUT SEARCH ---
             # Only run fan-out if the initial page analysis failed
             # if not initial_result.get("privacy_policy_url"):
-            if True:
+            if False:
                 logger.info("Policy not found on main page. Starting fan-out search...")
                 
                 
