@@ -75,9 +75,9 @@ class PrivacyAnalyzer:
             if not page.url == url:
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
-            # Step 1: Get heuristic candidates first
-            promising_links = await self._filter_internal_links(page, url, user_keywords)
-            logger.debug(f"Internal links found: {promising_links}")
+            # Step 1: Get heuristic candidates as rich objects ({href, text})
+            promising_links_objects = await self._filter_internal_links(page, url, user_keywords)
+            logger.debug(f"Internal links found: {promising_links_objects}")
 
             # Check for external redirect after navigation
             final_netloc = urlparse(page.url).netloc
@@ -88,21 +88,22 @@ class PrivacyAnalyzer:
             html = await page.content()
             html_lower = html.lower()
 
-            # Step 2: Call LLM to get its best guess
-            policy_output = await self._extract_policy_url_from_html(html, url, promising_links)
+            # Step 2: Call LLM with a simple list of hrefs for the prompt
+            href_list_for_llm = [link['href'] for link in promising_links_objects]
+            policy_output = await self._extract_policy_url_from_html(html, url, href_list_for_llm)
             llm_url = policy_output.get("privacy_policy_url")
             logger.debug(f"Returned choice from LLM: {llm_url}")
 
             # Step 3: Validate the LLM's choice and apply heuristic override if needed
-            if promising_links and llm_url:
-                # Check if the LLM's choice is valid (i.e., it's one of the promising links)
-                is_llm_choice_valid = any(llm_url in link for link in promising_links)
+            if promising_links_objects and llm_url:
+                # Check if the LLM's choice is valid (i.e., it's one of the promising hrefs)
+                is_llm_choice_valid = any(llm_url in link_obj['href'] for link_obj in promising_links_objects)
                 
                 if not is_llm_choice_valid:
                     logger.warning(f"LLM disobeyed prompt. Its choice '{llm_url}' was not in the candidate list. Applying heuristic fallback.")
                     
-                    # Use the programmatic selector to get a better link
-                    heuristic_url = self._get_best_candidate(promising_links, user_keywords)
+                    # Use the programmatic selector with the rich link objects
+                    heuristic_url = self._get_best_candidate(promising_links_objects, user_keywords)
                     
                     if heuristic_url:
                         logger.info(f"Heuristic override selected: '{heuristic_url}'")
@@ -295,18 +296,20 @@ class PrivacyAnalyzer:
 
 
     # --- Generic Utility Methods ---
-    async def _filter_internal_links(self, page, site_url: str, filter_keywords: Optional[List[str]] = None)  -> List[str]:
+    async def _filter_internal_links(self, page, site_url: str, filter_keywords: Optional[List[str]] = None) -> List[Dict[str, str]]:
         """
-        Helper to extract all internal links (including subdomains) from a page.
+        Helper to extract all internal links (including subdomains) from a page,
+        returning both the URL and the anchor text.
         """
         logger.debug(f"filtering keywords: {filter_keywords}")
         links = []
+        unique_hrefs = set()
+
         if filter_keywords is None:
             filter_keywords = []
         lower_keywords = [k.lower() for k in filter_keywords]
 
         base_netloc = urlparse(site_url).netloc
-        # remove "www."  to get the root
         root_domain = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc 
         
         for a in await page.query_selector_all('a'):
@@ -315,41 +318,71 @@ class PrivacyAnalyzer:
                 href = await a.get_attribute('href')
                 if href:
                     full_url = urljoin(site_url, href)
+                    
+                    # Avoid duplicates
+                    if full_url in unique_hrefs:
+                        continue
+
                     link_netloc = urlparse(full_url).netloc 
                     
-                    # conditions
                     is_exact_domain = (link_netloc == root_domain)
                     is_subdomain = link_netloc.endswith("." + root_domain)
                     
-                    if (is_exact_domain or is_subdomain) and \
-                       '#' not in full_url and \
-                       not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.xml', '.json', '.zip', '.rar', '.tar', '.gz', '.svg', '.ico')):
+                    if (is_exact_domain or is_subdomain) and '#' not in full_url and not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.xml', '.json', '.zip', '.rar', '.tar', '.gz', '.svg', '.ico')):
+                        text_content = (await a.inner_text() or "").strip()
+                        search_area = href.lower() + " " + text_content.lower()
                         
-
-                        #filtering for specific keywords
-                        text_content = await a.inner_text()
-                        search_area = href.lower() + " " + text_content.strip().lower()
                         if not lower_keywords or any(keyword in search_area for keyword in lower_keywords):
-                            logger.debug(f"Adding link {full_url} with a={text_content} and href={href}")
-                            links.append(full_url)
-
-                        
+                            logger.debug(f"Adding link {full_url} with text='{text_content}'")
+                            links.append({"href": full_url, "text": text_content})
+                            unique_hrefs.add(full_url)
             except Exception as e:
                 logger.debug(f"Could not process link {href}: {e}")
 
-        return list(set(links))
+        return links
     
-    def _get_best_candidate(self, promising_links: List[str], keyword_priority_list: List[str]):
+    def _get_best_candidate(self, promising_links: List[Dict[str, str]], keyword_priority_list: List[str]) -> Optional[str]:
+        """
+        Selects the best URL from a list of candidates using a weighted scoring system
+        based on a prioritized list of keywords.
+        """
         if not promising_links or not keyword_priority_list:
             return None
-            
-        for keyword in keyword_priority_list:
-            
-            for link in promising_links:
-                required_words = keyword.lower().split()
-                link_lower = link.lower()
-                
-                if all(word in link_lower for word in required_words):
-                    return link
 
-        return None
+        best_link_href = None
+        max_score = -1
+        num_keywords = len(keyword_priority_list)
+
+        for link_data in promising_links:
+            current_score = 0
+            # Iterate through keywords to calculate a score for the current link
+            for i, keyword in enumerate(keyword_priority_list):
+                # Higher priority keywords (earlier in the list) get a higher base weight
+                weight = num_keywords - i
+                
+                # Split keyword phrase into individual words
+                required_words = keyword.lower().split()
+
+                # Give a higher score for matches in the anchor text (strong signal)
+                if all(word in link_data["text"].lower() for word in required_words):
+                    current_score += weight * 2
+                
+                # Give a lower score for matches in the URL itself
+                if all(word in link_data["href"].lower() for word in required_words):
+                    current_score += weight
+
+            # Update the best link if the current one has a better score
+            if current_score > max_score:
+                max_score = current_score
+                best_link_href = link_data["href"]
+            # Tie-breaker: if scores are equal, prefer the shorter link
+            elif current_score == max_score and best_link_href:
+                if len(link_data["href"]) < len(best_link_href):
+                    best_link_href = link_data["href"]
+        
+        if best_link_href:
+            logger.info(f"Heuristic selection: chose '{best_link_href}' with score {max_score}")
+        else:
+            logger.info("Heuristic selection: no suitable candidate found.")
+
+        return best_link_href
