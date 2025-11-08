@@ -23,15 +23,15 @@ class PrivacyAnalyzer:
         Sends HTML content to the LLM to find the privacy policy URL on a single page.
         """
         prompt = f"""
-        You are an expert web analysis agent. Your task is to find the URL of the privacy policy page from the provided HTML content.
+        You are an expert web analysis agent. Your task is to find the URL of the privacy policy page of this site {url}.
         
-        A pre-filtered list of candidate links has been provided: {promising_links}
+        A pre-filtered list of candidate links has been provided: {promising_links}, so choose from these links the most valuable candidate for privacy page. 
 
-        **CRITICAL RULE: If the candidate link list is not empty, you MUST choose the best and most relevant option from that list.** 
-        Only search the full HTML content below if the candidate list is empty or contains no suitable links.
+        **CRITICAL RULE: If the candidate link list is not empty, you choose the best and most relevant option from that list. Only if the candidates list is empty you can search in the HTML content.** 
         
         When searching, look for links containing keywords like 'privacy policy', 'GDPR', 'data protection', 'privacy center'.
         The privacy policy is often in the footer of the page. Note that the cookie policy and the privacy policy could be on different URLs, so be sure to return the main privacy policy.
+        Notice that cookie page and privage page could be on separate pages so do not return return the cookie page in palce of privacy page. 
 
         The HTML content to analyze is below:
         ---
