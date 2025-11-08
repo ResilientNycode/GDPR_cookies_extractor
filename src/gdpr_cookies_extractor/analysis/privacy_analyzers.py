@@ -130,7 +130,8 @@ class PrivacyAnalyzer:
             
             # FAN-OUT SEARCH ---
             # Only run fan-out if the initial page analysis failed
-            if not initial_result.get("privacy_policy_url"):
+            # if not initial_result.get("privacy_policy_url"):
+            if True:
                 logger.info("Policy not found on main page. Starting fan-out search...")
                 
                 
