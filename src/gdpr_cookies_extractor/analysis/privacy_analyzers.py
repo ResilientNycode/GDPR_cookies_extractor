@@ -186,6 +186,86 @@ class PrivacyAnalyzer:
             logger.error(f"Critical error during privacy policy search for {site_url}: {e}")
             return {"reasoning": f"Failed during privacy policy search: {e}", "privacy_policy_url": None}
 
+    async def _ask_llm_about_cookie_declaration(self, page_content: str) -> Dict[str, Any]:
+        """
+        Asks the LLM to determine if the page content contains a cookie declaration.
+        """
+        prompt = f"""
+        You are an expert in GDPR and web compliance. Your task is to analyze the following text from a web page and determine if it contains a detailed "Cookie Declaration" or "Cookie Policy".
+
+        A "Cookie Declaration" is NOT just a brief mention of cookies. It is a specific section that details the types of cookies used, their purpose, and often includes a list or table of the cookies.
+
+        Look for headings and sections such as:
+        - "Cookies Policy"
+        - "What are cookies"
+        - "Why do we use cookies"
+        - "Where do we use cookies?"
+        - A table or detailed list of cookies.
+
+        Analyze the text below:
+        ---
+        {page_content}
+        ---
+
+        Based on your analysis, you MUST return a single JSON object with the following structure:
+        {{
+          "has_cookie_declaration": <boolean>,
+          "reasoning": <string>
+        }}
+        - has_cookie_declaration: Set to true if you find a detailed cookie declaration or policy section, false otherwise.
+        - reasoning: Briefly explain your decision. For example, "The text contains a dedicated 'Cookie Policy' section with a list of cookies." or "The text only mentions cookies briefly without providing details."
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "has_cookie_declaration": False,
+                "reasoning": f"LLM query failed: {response.error}"
+            }
+        
+        return response.data
+
+    async def find_cookie_declaration_page(self, context, privacy_policy_url: str) -> Dict[str, Any]:
+        """
+        Analyzes the given privacy policy page to see if it contains the cookie declaration.
+        """
+        if not privacy_policy_url:
+            return {"cookie_declaration_url": None, "reasoning": "No privacy policy URL provided."}
+
+        page = None
+        try:
+            logger.info(f"Analyzing for cookie declaration on: {privacy_policy_url}")
+            page = await context.new_page()
+            await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
+            
+            # Use evaluate to get the body's innerText, which is cleaner than page.content()
+            page_content = await page.evaluate("document.body.innerText")
+
+            if not page_content:
+                return {"cookie_declaration_url": None, "reasoning": "Page content was empty."}
+
+            llm_result = await self._ask_llm_about_cookie_declaration(page_content)
+
+            if llm_result.get("has_cookie_declaration"):
+                logger.info(f"Found cookie declaration on {privacy_policy_url}. Reason: {llm_result.get('reasoning')}")
+                return {
+                    "cookie_declaration_url": privacy_policy_url,
+                    "reasoning": llm_result.get('reasoning')
+                }
+            else:
+                logger.info(f"No cookie declaration found on {privacy_policy_url}. Reason: {llm_result.get('reasoning')}")
+                return {
+                    "cookie_declaration_url": None,
+                    "reasoning": llm_result.get('reasoning')
+                }
+
+        except Exception as e:
+            logger.error(f"Error analyzing page for cookie declaration {privacy_policy_url}: {e}")
+            return {"cookie_declaration_url": None, "reasoning": f"Failed to analyze page: {e}"}
+        finally:
+            if page:
+                await page.close()
+
     # --- Cookie Analysis Methods ---
     async def categorize_cookies(self, cookies_data: list):
         """

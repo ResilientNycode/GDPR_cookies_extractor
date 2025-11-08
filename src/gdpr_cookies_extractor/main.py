@@ -99,6 +99,18 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
                 policy_url_path = llm_output.get("privacy_policy_url")
                 full_privacy_policy_url = urljoin(current_url, policy_url_path)
 
+                cookie_declaration_task = asyncio.create_task(analyzer.find_cookie_declaration_page(
+                    context, full_privacy_policy_url,
+                    filter_keywords=search_keywords_config.get('cookie_declaration', [])
+                ))
+
+                cookie_decl_res  = await asyncio.gather(cookie_declaration_task)
+                
+                # Collect results into the extensible dictionary
+                analyses_results = {
+                    "cookie_declaration": cookie_decl_res
+                }
+
             await dump_data(current_url, scenario, cookies, context, full_privacy_policy_url, timestamp)
             
             # Format Success Result ---
