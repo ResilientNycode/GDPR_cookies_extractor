@@ -59,7 +59,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, promising_links: List[str], user_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         [WORKER FUNCTION]
         Analyzes a SINGLE page (URL) for a policy link and calculates a keyword bonus.
@@ -71,6 +71,9 @@ class PrivacyAnalyzer:
             logger.info(f"Analyzing page (Hop {hop_num}): {url}")
             if not page.url == url: # Avoid unnecessary navigation if already on the page
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
+
+            promising_links = await self._filter_internal_links(page, url, user_keywords)
+            logger.debug(f"Interanl links found: {promising_links}")
 
             # Check for external redirect after navigation
             final_netloc = urlparse(page.url).netloc
@@ -138,12 +141,9 @@ class PrivacyAnalyzer:
             # INITIAL ANALYSIS ---
             # Use the worker function for the main site_url
             initial_page = await browser.new_page()
-
-            promising_links = await self._filter_internal_links(initial_page, site_url, filter_keywords)
-            logger.debug(f"Interanl links found: {promising_links}")
             
             initial_result = await self._analyze_page_for_policy(
-                initial_page, site_url, 0, root_domain, filter_keywords, promising_links
+                initial_page, site_url, 0, root_domain, filter_keywords
             )
             
             if initial_result and initial_result.get("privacy_policy_url"):
