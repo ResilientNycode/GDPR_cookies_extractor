@@ -24,15 +24,7 @@
     }
   },
   "search_keywords": {
-    "privacy_policy": [
-      "privacy",
-      "legal",
-      "terms",
-      "imprint",
-      "about",
-      "contact",
-      "privacy statement"
-    ],
+    "privacy_policy": ["privacy", "privacy statement", "privacy center"],
     "cookie_declaration": ["cookie", "technologies", "imprint"],
     "data_deletion": ["delete", "erase", "clear", "manage", "dashboard"],
     "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
