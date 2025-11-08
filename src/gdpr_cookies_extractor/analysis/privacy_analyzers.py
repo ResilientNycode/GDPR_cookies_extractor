@@ -24,10 +24,9 @@ class PrivacyAnalyzer:
         """
         prompt = f"""
         You are an expert web analysis agent. Your task is to find the URL of the privacy policy page for the given website.
-        This page is often linked from the footer with a 'Privacy' word or similar. 
+        This page is often linked from the footer with a 'Privacy' word or similar. Notice that the cookie policy and the privacy policy could be on different url so be sure to return the privacy polcy and note the cookie policy. 
         Analyze the provided HTML content and find the most likely URL for the privacy policy.
-        Look for links containing keywords like 'privacy', 'policy', 'GDPR', 'data protection', 'privacy center'.
-        Notice that the cookie policy and the privacy policy could be on different url so be sure to return the privacy polcy and note the cookie policy. 
+        Look for links containing keywords like 'privacy policy', 'GDPR', 'data protection', 'privacy center'.
         
         The HTML content to analyze is below:
         ---
