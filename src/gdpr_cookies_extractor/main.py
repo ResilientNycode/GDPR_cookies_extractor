@@ -57,7 +57,7 @@ async def dump_data(current_url: str, scenario: str, cookies: list, browser, ful
             logger.error(f"Failed to dump privacy policy for {full_privacy_policy_url}: {e}")
 
 
-async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str, user_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
+async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
     Returns a SiteAnalysisResult object.
@@ -89,7 +89,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
             # Find Privacy Policy Page
             llm_output = await analyzer.find_privacy_policy(
                 browser, current_url, 
-                filter_keywords=user_keywords_config.get('privacy_policy', []),
+                filter_keywords=search_keywords_config.get('privacy_policy', []),
             )
 
 
@@ -118,7 +118,7 @@ async def process_site_scenario(browser, analyzer: PrivacyAnalyzer, site_url: st
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
 
-async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser, timestamp: str, user_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
+async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
     """
     Creates and runs all analysis tasks concurrently.
     """
@@ -134,7 +134,7 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
             
         for scenario in scenarios:
             tasks.append(
-                process_site_scenario(browser, analyzer, site_url, scenario, timestamp, user_keywords_config)
+                process_site_scenario(browser, analyzer, site_url, scenario, timestamp, search_keywords_config)
             )
     
     results = await asyncio.gather(*tasks)
@@ -195,7 +195,7 @@ def load_user_defined_keywords():
     try:
         with open('config.json', 'r') as f:
             config = json.load(f)
-        return config.get('user_defined_keywords', {})
+        return config.get('search_keywords', {})
     except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
         logger.warning(f"Could not load user_defined_keywords from config.json: {e}. Using empty dict.")
         return {}
@@ -207,7 +207,7 @@ async def gdpr_analysis(sites_df):
     """
     llm_config = load_llm_config()
     scraper_config = load_scraper_config()
-    user_keywords_config = load_user_defined_keywords()
+    search_keywords_config = load_user_defined_keywords()
     timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     
     llm_provider = OllamaProvider(model=llm_config.get('model', 'llama3'))
@@ -220,7 +220,7 @@ async def gdpr_analysis(sites_df):
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         
-        all_results = await run_all_analyses(sites_df, analyzer, browser, timestamp, user_keywords_config)
+        all_results = await run_all_analyses(sites_df, analyzer, browser, timestamp, search_keywords_config)
         
         await browser.close()
     

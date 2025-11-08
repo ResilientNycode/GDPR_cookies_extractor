@@ -316,6 +316,7 @@ class PrivacyAnalyzer:
                         text_content = await a.inner_text()
                         search_area = href.lower() + " " + text_content.strip().lower()
                         if not lower_keywords or any(keyword in search_area for keyword in lower_keywords):
+                            logger.debug(f"Adding link {full_url} with a={text_content} and href={href}")
                             links.append(full_url)
 
                         
