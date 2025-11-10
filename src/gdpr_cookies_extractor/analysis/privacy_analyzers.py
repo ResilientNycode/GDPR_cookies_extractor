@@ -459,16 +459,18 @@ class PrivacyAnalyzer:
 
     async def find_data_retention_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
         """
-        Finds the data retention page using a multi-stage hybrid analysis.
+        Finds the data retention page using a multi-stage hybrid analysis, mirroring the cookie declaration search logic.
         1.  Check if the declaration is on the initial privacy policy page.
-        2.  If not, use a hybrid model (heuristic filter + LLM selection + heuristic validation) to find a link to a separate page.
-        3.  Validate the content of the separate page with another LLM call.
+        2.  Always try to find a link to a separate, dedicated page.
+        3.  Validate the content of the separate page.
+        4.  Prefer the dedicated page if found and validated, otherwise fall back to the initial page.
         """
         if not privacy_policy_url:
             return {"data_retention_url": None, "reasoning": "No privacy policy URL provided."}
 
         page = None
         validation_page = None
+        stage1_result = None
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for data retention ON the page: {privacy_policy_url}")
@@ -481,48 +483,49 @@ class PrivacyAnalyzer:
             else:
                 llm_content_result = await self._ask_llm_about_data_retention_declaration(page_content)
                 if llm_content_result.get("has_data_retention_declaration"):
-                    logger.info(f"SUCCESS: Found data retention policy directly on {privacy_policy_url}. Reason: {llm_content_result.get('reasoning')}")
-                    return {
+                    logger.info(f"Stage 1 SUCCESS: Found data retention policy directly on {privacy_policy_url}. Storing result.")
+                    stage1_result = {
                         "data_retention_url": privacy_policy_url,
                         "reasoning": llm_content_result.get('reasoning'),
                         "retention_period_summary": llm_content_result.get('retention_period_summary')
                     }
             
-            logger.info("Data retention policy not found on initial page. Stage 2: Starting HYBRID search for a separate link.")
+            logger.info("Stage 2: Starting HYBRID search for a separate data retention link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
-            logger.debug(f"Full search_keywords_config for data_retention: {search_keywords_config}")
             data_retention_keywords = search_keywords_config.get('data_retention', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_retention_keywords)
             
             if not promising_links_objects:
-                logger.info("No promising links found for data retention. Cannot proceed.")
+                logger.info("No promising links found for a separate data retention page.")
+                if stage1_result:
+                    logger.info("No separate link found, returning Stage 1 result.")
+                    return stage1_result
                 return {"data_retention_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}
 
             html_content = await page.content()
             href_list_for_llm = [link['href'] for link in promising_links_objects]
             llm_link_choice_result = await self._extract_data_retention_link_from_html(html_content, privacy_policy_url, href_list_for_llm)
             llm_chosen_link = llm_link_choice_result.get("data_retention_policy_link")
-            logger.debug(f"LLM chose '{llm_chosen_link}' for data retention from candidate list.")
 
             final_candidate_url = None
             is_llm_choice_valid = any(llm_chosen_link in link_obj['href'] for link_obj in promising_links_objects) if llm_chosen_link else False
 
             if llm_chosen_link and is_llm_choice_valid:
                 final_candidate_url = llm_chosen_link
-                logger.info(f"LLM chose a valid candidate for data retention: {final_candidate_url}")
             else:
                 logger.warning("LLM choice for data retention was invalid or missing. Applying heuristic fallback.")
                 heuristic_choice = self._get_best_candidate(promising_links_objects, data_retention_keywords)
                 if heuristic_choice:
                     final_candidate_url = heuristic_choice
-                    logger.info(f"Heuristic override for data retention selected: {final_candidate_url}")
                 else:
-                    logger.error("FATAL: Heuristic fallback for data retention failed.")
-                    return {"data_retention_url": None, "reasoning": "LLM and heuristic both failed to choose a link for data retention."}
+                    logger.error("Heuristic fallback for data retention also failed.")
+                    if stage1_result:
+                        return stage1_result
+                    return {"data_retention_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
 
             full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
-            logger.info(f"Hybrid model selected link for data retention: {full_candidate_url}. Stage 3: Validating content.")
+            logger.info(f"Hybrid model selected data retention link: {full_candidate_url}. Stage 3: Validating content.")
 
             # --- Stage 3: Validate the content of the final candidate page ---
             validation_page = await context.new_page()
@@ -531,22 +534,30 @@ class PrivacyAnalyzer:
             validation_content = await validation_page.evaluate("document.body.innerText")
             if not validation_content:
                 logger.warning(f"Candidate data retention page {full_candidate_url} has no text content.")
+                if stage1_result:
+                    return stage1_result
                 return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
 
             validation_llm_result = await self._ask_llm_about_data_retention_declaration(validation_content)
 
             if validation_llm_result.get("has_data_retention_declaration"):
-                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the data retention policy. Reason: {validation_llm_result.get('reasoning')}")
+                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the data retention policy. This is the preferred result.")
                 return {
                     "data_retention_url": full_candidate_url,
-                    "reasoning": f"Found and validated separate data retention policy at {full_candidate_url}."
+                    "reasoning": f"Found and validated separate data retention policy at {full_candidate_url}.",
+                    "retention_period_summary": validation_llm_result.get('retention_period_summary')
                 }
             else:
-                logger.info(f"Validation failed for {full_candidate_url}. Reason: {validation_llm_result.get('reasoning')}")
-                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed."}
+                logger.info(f"Validation of separate data retention page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
+                if stage1_result:
+                    logger.info("Falling back to Stage 1 result for data retention.")
+                    return stage1_result
+                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial policy was found."}
 
         except Exception as e:
             logger.error(f"Error during data retention page search for {privacy_policy_url}: {e}")
+            if stage1_result:
+                return stage1_result
             return {"data_retention_url": None, "reasoning": f"An exception occurred: {e}"}
         finally:
             if page:
