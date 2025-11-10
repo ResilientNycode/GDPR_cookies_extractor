@@ -369,6 +369,182 @@ class PrivacyAnalyzer:
             if validation_page:
                 await validation_page.close()
 
+    async def _ask_llm_about_data_retention_declaration(self, page_content: str) -> Dict[str, Any]:
+        """
+        Asks the LLM to determine if the page content contains a data retention declaration.
+        """
+        prompt = f"""
+        You are an expert in GDPR and web compliance. Your task is to analyze the following text from a web page and determine if it contains a detailed "Data Retention" or "Data Storage" policy.
+
+        A "Data Retention Policy" is NOT just a brief mention of data storage. It is a specific section that details how long different types of personal data are kept, for what purpose, and the criteria used to determine those periods.
+
+        Look for headings and sections such as:
+        - "Data Retention"
+        - "How long we keep your data"
+        - "Data Storage Periods"
+        - "Retention of Personal Information"
+        - A table or detailed list of data types and their retention periods.
+
+        Analyze the text below:
+        ---
+        {page_content}
+        ---
+
+        Based on your analysis, you MUST return a single JSON object with the following structure:
+        {{
+          "has_data_retention_declaration": <boolean>,
+          "reasoning": <string>
+        }}
+        - has_data_retention_declaration: Set to true if you find a detailed data retention policy section, false otherwise.
+        - reasoning: Briefly explain your decision. For example, "The text contains a dedicated 'Data Retention' section with a list of data types and storage periods." or "The text only mentions data storage briefly without providing details."
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "has_data_retention_declaration": False,
+                "reasoning": f"LLM query failed: {response.error}"
+            }
+        
+        return response.data
+
+    async def _extract_data_retention_link_from_html(self, html_content: str, url: str, promising_links: List[str]) -> Dict[str, Any]:
+        """
+        Sends HTML content and a list of candidate links to the LLM to find the best link to a separate data retention policy page.
+        """
+        prompt = f"""
+        You are an expert web analysis agent. Your task is to find a URL pointing to a "Data Retention Policy" or "Data Storage Information" page from the HTML content of the page: {url}.
+
+        A pre-filtered list of candidate links has been provided: {promising_links}.
+        **CRITICAL RULE: If the candidate link list is not empty, you MUST choose the best and most relevant option from that list. Only if the candidates list is empty you can search in the full HTML content.** 
+
+        The privacy policy and data retention policy might be separate. I am on the privacy page, and I need to find the link to the specific data retention policy page.
+        Look for anchor tags `<a>` with text like "Data Retention", "Storage Periods", "How long we store your data", or similar phrases.
+
+        The HTML content to analyze is below:
+        ---
+        {html_content}
+        ---
+        
+        The URL of the current page is: {url}
+
+        You MUST return a single JSON object and nothing else.
+        Return your answer as a single JSON object with the following structure:
+        {{
+          "data_retention_policy_link": <string | null>,
+          "reasoning": <string>,
+          "confidence_score": <number>
+        }}
+        - data_retention_policy_link: Must be the absolute or relative URL to the data retention page. If no link is found, this MUST be null.
+        - reasoning: Explain your choice.
+        - confidence_score: A number from 0.0 to 1.0 indicating your certainty.
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "data_retention_policy_link": None,
+                "reasoning": response.error,
+                "confidence_score": 0.0
+            }
+        
+        return response.data
+
+    async def find_data_retention_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+        """
+        Finds the data retention page using a multi-stage hybrid analysis.
+        1.  Check if the declaration is on the initial privacy policy page.
+        2.  If not, use a hybrid model (heuristic filter + LLM selection + heuristic validation) to find a link to a separate page.
+        3.  Validate the content of the separate page with another LLM call.
+        """
+        if not privacy_policy_url:
+            return {"data_retention_url": None, "reasoning": "No privacy policy URL provided."}
+
+        page = None
+        validation_page = None
+        try:
+            # --- Stage 1: Analyze the initial privacy policy page for content ---
+            logger.info(f"Stage 1: Analyzing for data retention ON the page: {privacy_policy_url}")
+            page = await context.new_page()
+            await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
+            
+            page_content = await page.evaluate("document.body.innerText")
+            if not page_content:
+                logger.warning(f"Initial page {privacy_policy_url} has no text content.")
+            else:
+                llm_content_result = await self._ask_llm_about_data_retention_declaration(page_content)
+                if llm_content_result.get("has_data_retention_declaration"):
+                    logger.info(f"SUCCESS: Found data retention policy directly on {privacy_policy_url}. Reason: {llm_content_result.get('reasoning')}")
+                    return {
+                        "data_retention_url": privacy_policy_url,
+                        "reasoning": llm_content_result.get('reasoning')
+                    }
+            
+            logger.info("Data retention policy not found on initial page. Stage 2: Starting HYBRID search for a separate link.")
+
+            # --- Stage 2: Hybrid model to find the best candidate link ---
+            data_retention_keywords = search_keywords_config.get('data_retention', [])
+            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_retention_keywords)
+            
+            if not promising_links_objects:
+                logger.info("No promising links found for data retention. Cannot proceed.")
+                return {"data_retention_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}
+
+            html_content = await page.content()
+            href_list_for_llm = [link['href'] for link in promising_links_objects]
+            llm_link_choice_result = await self._extract_data_retention_link_from_html(html_content, privacy_policy_url, href_list_for_llm)
+            llm_chosen_link = llm_link_choice_result.get("data_retention_policy_link")
+            logger.debug(f"LLM chose '{llm_chosen_link}' for data retention from candidate list.")
+
+            final_candidate_url = None
+            is_llm_choice_valid = any(llm_chosen_link in link_obj['href'] for link_obj in promising_links_objects) if llm_chosen_link else False
+
+            if llm_chosen_link and is_llm_choice_valid:
+                final_candidate_url = llm_chosen_link
+                logger.info(f"LLM chose a valid candidate for data retention: {final_candidate_url}")
+            else:
+                logger.warning("LLM choice for data retention was invalid or missing. Applying heuristic fallback.")
+                heuristic_choice = self._get_best_candidate(promising_links_objects, data_retention_keywords)
+                if heuristic_choice:
+                    final_candidate_url = heuristic_choice
+                    logger.info(f"Heuristic override for data retention selected: {final_candidate_url}")
+                else:
+                    logger.error("FATAL: Heuristic fallback for data retention failed.")
+                    return {"data_retention_url": None, "reasoning": "LLM and heuristic both failed to choose a link for data retention."}
+
+            full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
+            logger.info(f"Hybrid model selected link for data retention: {full_candidate_url}. Stage 3: Validating content.")
+
+            # --- Stage 3: Validate the content of the final candidate page ---
+            validation_page = await context.new_page()
+            await validation_page.goto(full_candidate_url, timeout=60000, wait_until="domcontentloaded")
+            
+            validation_content = await validation_page.evaluate("document.body.innerText")
+            if not validation_content:
+                logger.warning(f"Candidate data retention page {full_candidate_url} has no text content.")
+                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+
+            validation_llm_result = await self._ask_llm_about_data_retention_declaration(validation_content)
+
+            if validation_llm_result.get("has_data_retention_declaration"):
+                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the data retention policy. Reason: {validation_llm_result.get('reasoning')}")
+                return {
+                    "data_retention_url": full_candidate_url,
+                    "reasoning": f"Found and validated separate data retention policy at {full_candidate_url}."
+                }
+            else:
+                logger.info(f"Validation failed for {full_candidate_url}. Reason: {validation_llm_result.get('reasoning')}")
+                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed."}
+
+        except Exception as e:
+            logger.error(f"Error during data retention page search for {privacy_policy_url}: {e}")
+            return {"data_retention_url": None, "reasoning": f"An exception occurred: {e}"}
+        finally:
+            if page:
+                await page.close()
+            if validation_page:
+                await validation_page.close()
+
     # --- Cookie Analysis Methods ---
     async def categorize_cookies(self, cookies_data: list):
         """
