@@ -565,6 +565,192 @@ class PrivacyAnalyzer:
             if validation_page:
                 await validation_page.close()
 
+    async def _ask_llm_about_data_deletion_declaration(self, page_content: str) -> Dict[str, Any]:
+        """
+        Asks the LLM to determine if the page content contains a data deletion declaration
+        and to extract a summary of how to delete data.
+        """
+        prompt = f"""
+        You are an expert in GDPR and web compliance. Your task is to analyze the following text from a web page to determine if it contains a "Data Deletion" policy and to summarize how a user can delete their data.
+
+        1.  **Analyze for Policy:** First, determine if the text contains a specific section about data deletion or user rights to erasure. Look for headings like "Data Deletion", "Your Right to Erasure", "Deleting Your Information", or "Managing Your Data".
+
+        2.  **Extract Deletion Method:** If a data deletion section is found, carefully read it and extract a concise summary of the method for deleting data. For example: "Users can delete their data from their account settings dashboard", "A data deletion request can be sent to privacy@example.com", or "Data is deleted automatically upon account closure."
+
+        **CRITICAL RULE:** Do NOT invent information. If the text does not explicitly state how to delete data, you MUST set the summary to null.
+
+        Analyze the text below:
+        ---
+        {page_content}
+        ---
+
+        Based on your analysis, you MUST return a single JSON object with the following structure:
+        {{
+          "has_data_deletion_declaration": <boolean>,
+          "reasoning": <string>,
+          "deletion_method_summary": <string | null>
+        }}
+        - has_data_deletion_declaration: Set to true if you find a detailed data deletion policy section, false otherwise.
+        - reasoning: Briefly explain your decision.
+        - deletion_method_summary: A concise summary of how a user can delete their data. If no specific method is mentioned, this MUST be null.
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "has_data_deletion_declaration": False,
+                "reasoning": f"LLM query failed: {response.error}",
+                "deletion_method_summary": None
+            }
+        
+        return response.data
+
+    async def _extract_data_deletion_link_from_html(self, html_content: str, url: str, promising_links: List[str]) -> Dict[str, Any]:
+        """
+        Sends HTML content and a list of candidate links to the LLM to find the best link to a separate data deletion page.
+        """
+        prompt = f"""
+        You are an expert web analysis agent. Your task is to find a URL pointing to a "Data Deletion", "Privacy Dashboard", or "Manage Your Data" page from the HTML content of the page: {url}.
+
+        A pre-filtered list of candidate links has been provided: {promising_links}.
+        **CRITICAL RULE: If the candidate link list is not empty, you MUST choose the best and most relevant option from that list. Only if the candidates list is empty you can search in the full HTML content.** 
+
+        The privacy policy and data deletion instructions might be on separate pages. I am on the privacy page, and I need to find the link to a specific page for managing or deleting data.
+        Look for anchor tags `<a>` with text like "Delete Your Data", "Data Deletion", "Privacy Dashboard", "Manage Your Information", or similar phrases.
+
+        The HTML content to analyze is below:
+        ---
+        {html_content}
+        ---
+        
+        The URL of the current page is: {url}
+
+        You MUST return a single JSON object and nothing else.
+        Return your answer as a single JSON object with the following structure:
+        {{
+          "data_deletion_policy_link": <string | null>,
+          "reasoning": <string>,
+          "confidence_score": <number>
+        }}
+        - data_deletion_policy_link: Must be the absolute or relative URL to the data deletion page. If no link is found, this MUST be null.
+        - reasoning: Explain your choice.
+        - confidence_score: A number from 0.0 to 1.0 indicating your certainty.
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "data_deletion_policy_link": None,
+                "reasoning": response.error,
+                "confidence_score": 0.0
+            }
+        
+        return response.data
+
+    async def find_data_deletion_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+        """
+        Finds the data deletion page using a multi-stage hybrid analysis.
+        """
+        if not privacy_policy_url:
+            return {"data_deletion_url": None, "reasoning": "No privacy policy URL provided."}
+
+        page = None
+        validation_page = None
+        stage1_result = None
+        try:
+            # --- Stage 1: Analyze the initial privacy policy page for content ---
+            logger.info(f"Stage 1: Analyzing for data deletion ON the page: {privacy_policy_url}")
+            page = await context.new_page()
+            await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
+            
+            page_content = await page.evaluate("document.body.innerText")
+            if not page_content:
+                logger.warning(f"Initial page {privacy_policy_url} has no text content.")
+            else:
+                llm_content_result = await self._ask_llm_about_data_deletion_declaration(page_content)
+                if llm_content_result.get("has_data_deletion_declaration"):
+                    logger.info(f"Stage 1 SUCCESS: Found data deletion info directly on {privacy_policy_url}. Storing result.")
+                    stage1_result = {
+                        "data_deletion_url": privacy_policy_url,
+                        "reasoning": llm_content_result.get('reasoning'),
+                        "deletion_method_summary": llm_content_result.get('deletion_method_summary')
+                    }
+            
+            logger.info("Stage 2: Starting HYBRID search for a separate data deletion link.")
+
+            # --- Stage 2: Hybrid model to find the best candidate link ---
+            data_deletion_keywords = search_keywords_config.get('data_deletion', [])
+            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_deletion_keywords)
+            
+            if not promising_links_objects:
+                logger.info("No promising links found for a separate data deletion page.")
+                if stage1_result:
+                    logger.info("No separate link found, returning Stage 1 result.")
+                    return stage1_result
+                return {"data_deletion_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}
+
+            html_content = await page.content()
+            href_list_for_llm = [link['href'] for link in promising_links_objects]
+            llm_link_choice_result = await self._extract_data_deletion_link_from_html(html_content, privacy_policy_url, href_list_for_llm)
+            llm_chosen_link = llm_link_choice_result.get("data_deletion_policy_link")
+
+            final_candidate_url = None
+            is_llm_choice_valid = any(llm_chosen_link in link_obj['href'] for link_obj in promising_links_objects) if llm_chosen_link else False
+
+            if llm_chosen_link and is_llm_choice_valid:
+                final_candidate_url = llm_chosen_link
+            else:
+                logger.warning("LLM choice for data deletion was invalid or missing. Applying heuristic fallback.")
+                heuristic_choice = self._get_best_candidate(promising_links_objects, data_deletion_keywords)
+                if heuristic_choice:
+                    final_candidate_url = heuristic_choice
+                else:
+                    logger.error("Heuristic fallback for data deletion also failed.")
+                    if stage1_result:
+                        return stage1_result
+                    return {"data_deletion_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
+
+            full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
+            logger.info(f"Hybrid model selected data deletion link: {full_candidate_url}. Stage 3: Validating content.")
+
+            # --- Stage 3: Validate the content of the final candidate page ---
+            validation_page = await context.new_page()
+            await validation_page.goto(full_candidate_url, timeout=60000, wait_until="domcontentloaded")
+            
+            validation_content = await validation_page.evaluate("document.body.innerText")
+            if not validation_content:
+                logger.warning(f"Candidate data deletion page {full_candidate_url} has no text content.")
+                if stage1_result:
+                    return stage1_result
+                return {"data_deletion_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+
+            validation_llm_result = await self._ask_llm_about_data_deletion_declaration(validation_content)
+
+            if validation_llm_result.get("has_data_deletion_declaration"):
+                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the data deletion policy. This is the preferred result.")
+                return {
+                    "data_deletion_url": full_candidate_url,
+                    "reasoning": f"Found and validated separate data deletion policy at {full_candidate_url}.",
+                    "deletion_method_summary": validation_llm_result.get('deletion_method_summary')
+                }
+            else:
+                logger.info(f"Validation of separate data deletion page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
+                if stage1_result:
+                    logger.info("Falling back to Stage 1 result for data deletion.")
+                    return stage1_result
+                return {"data_deletion_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial policy was found."}
+
+        except Exception as e:
+            logger.error(f"Error during data deletion page search for {privacy_policy_url}: {e}")
+            if stage1_result:
+                return stage1_result
+            return {"data_deletion_url": None, "reasoning": f"An exception occurred: {e}"}
+        finally:
+            if page:
+                await page.close()
+            if validation_page:
+                await validation_page.close()
+
     # --- Cookie Analysis Methods ---
     async def categorize_cookies(self, cookies_data: list):
         """
