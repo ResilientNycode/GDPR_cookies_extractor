@@ -478,7 +478,8 @@ class PrivacyAnalyzer:
                     logger.info(f"SUCCESS: Found data retention policy directly on {privacy_policy_url}. Reason: {llm_content_result.get('reasoning')}")
                     return {
                         "data_retention_url": privacy_policy_url,
-                        "reasoning": llm_content_result.get('reasoning')
+                        "reasoning": llm_content_result.get('reasoning'),
+                        "retention_period_summary": llm_content_result.get('retention_period_summary')
                     }
             
             logger.info("Data retention policy not found on initial page. Stage 2: Starting HYBRID search for a separate link.")
