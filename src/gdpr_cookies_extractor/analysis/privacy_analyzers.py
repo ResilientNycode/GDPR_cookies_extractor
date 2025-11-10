@@ -483,6 +483,7 @@ class PrivacyAnalyzer:
             logger.info("Data retention policy not found on initial page. Stage 2: Starting HYBRID search for a separate link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
+            logger.debug(f"Full search_keywords_config for data_retention: {search_keywords_config}")
             data_retention_keywords = search_keywords_config.get('data_retention', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_retention_keywords)
             

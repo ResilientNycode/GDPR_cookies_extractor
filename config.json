@@ -36,6 +36,11 @@
       "use cookies",
       "technologies"
     ],
+    "data_retention": [
+      "data retention",
+      "how long we keep your data",
+      "retention periods"
+    ],
     "data_deletion": ["delete", "erase", "clear", "manage", "dashboard"],
     "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
   }
