@@ -371,19 +371,17 @@ class PrivacyAnalyzer:
 
     async def _ask_llm_about_data_retention_declaration(self, page_content: str) -> Dict[str, Any]:
         """
-        Asks the LLM to determine if the page content contains a data retention declaration.
+        Asks the LLM to determine if the page content contains a data retention declaration
+        and to extract a summary of the retention period.
         """
         prompt = f"""
-        You are an expert in GDPR and web compliance. Your task is to analyze the following text from a web page and determine if it contains a detailed "Data Retention" or "Data Storage" policy.
+        You are an expert in GDPR and web compliance. Your task is to analyze the following text from a web page to determine if it contains a "Data Retention" policy and to summarize the retention period if present.
 
-        A "Data Retention Policy" is NOT just a brief mention of data storage. It is a specific section that details how long different types of personal data are kept, for what purpose, and the criteria used to determine those periods.
+        1.  **Analyze for Policy:** First, determine if the text contains a specific section about data retention. This is NOT just a brief mention. It should detail how long data is kept. Look for headings like "Data Retention", "How long we keep your data", or "Retention of Personal Information".
 
-        Look for headings and sections such as:
-        - "Data Retention"
-        - "How long we keep your data"
-        - "Data Storage Periods"
-        - "Retention of Personal Information"
-        - A table or detailed list of data types and their retention periods.
+        2.  **Extract Retention Period:** If a data retention section is found, carefully read it and extract a concise summary of the data retention periods. For example: "User data is kept for the duration of the account plus 30 days", "Analytics data is retained for 26 months", or "Data is kept as long as necessary for legal and business purposes."
+
+        **CRITICAL RULE:** Do NOT invent information. If the text does not explicitly state a retention period or the policy is vague (e.g., "we keep data for as long as needed"), you MUST set the summary to null.
 
         Analyze the text below:
         ---
@@ -393,17 +391,20 @@ class PrivacyAnalyzer:
         Based on your analysis, you MUST return a single JSON object with the following structure:
         {{
           "has_data_retention_declaration": <boolean>,
-          "reasoning": <string>
+          "reasoning": <string>,
+          "retention_period_summary": <string | null>
         }}
         - has_data_retention_declaration: Set to true if you find a detailed data retention policy section, false otherwise.
-        - reasoning: Briefly explain your decision. For example, "The text contains a dedicated 'Data Retention' section with a list of data types and storage periods." or "The text only mentions data storage briefly without providing details."
+        - reasoning: Briefly explain your decision.
+        - retention_period_summary: A concise summary of the retention period if found. If no specific period is mentioned, this MUST be null.
         """
         response = await self.llm_client.query_json(user_prompt=prompt)
         
         if not response.success:
             return {
                 "has_data_retention_declaration": False,
-                "reasoning": f"LLM query failed: {response.error}"
+                "reasoning": f"LLM query failed: {response.error}",
+                "retention_period_summary": None
             }
         
         return response.data
