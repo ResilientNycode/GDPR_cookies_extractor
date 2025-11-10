@@ -272,14 +272,16 @@ class PrivacyAnalyzer:
         """
         Finds the cookie declaration page using a multi-stage hybrid analysis.
         1.  Check if the declaration is on the initial privacy policy page.
-        2.  If not, use a hybrid model (heuristic filter + LLM selection + heuristic validation) to find a link to a separate page.
+        2.  Always try to find a link to a separate, dedicated page.
         3.  Validate the content of the separate page with another LLM call.
+        4.  Prefer the dedicated page if found and validated, otherwise fall back to the initial page.
         """
         if not privacy_policy_url:
             return {"cookie_declaration_url": None, "reasoning": "No privacy policy URL provided."}
 
         page = None
         validation_page = None
+        stage1_result = None
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for cookie declaration ON the page: {privacy_policy_url}")
@@ -289,50 +291,48 @@ class PrivacyAnalyzer:
             page_content = await page.evaluate("document.body.innerText")
             if not page_content:
                 logger.warning(f"Initial page {privacy_policy_url} has no text content.")
-                # Don't exit, maybe we can still find a link
             else:
-                # First LLM call: Is the declaration on this page?
                 llm_content_result = await self._ask_llm_about_cookie_declaration(page_content)
                 if llm_content_result.get("has_cookie_declaration"):
-                    logger.info(f"SUCCESS: Found cookie declaration directly on {privacy_policy_url}. Reason: {llm_content_result.get('reasoning')}")
-                    return {
+                    logger.info(f"Stage 1 SUCCESS: Found cookie declaration directly on {privacy_policy_url}. Storing result and continuing search.")
+                    stage1_result = {
                         "cookie_declaration_url": privacy_policy_url,
                         "reasoning": llm_content_result.get('reasoning')
                     }
-            
-            logger.info("Declaration not found on initial page. Stage 2: Starting HYBRID search for a separate cookie policy link.")
+
+            logger.info("Stage 2: Starting HYBRID search for a separate cookie policy link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
-            # 2a: Heuristic pre-filter
             cookie_keywords = search_keywords_config.get('cookie_declaration', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, cookie_keywords)
             
             if not promising_links_objects:
-                logger.info("No promising links found via keyword filtering. Cannot proceed to link validation.")
+                logger.info("No promising links found for a separate page.")
+                if stage1_result:
+                    logger.info("No separate link found, returning Stage 1 result.")
+                    return stage1_result
                 return {"cookie_declaration_url": None, "reasoning": "Declaration not on page, and no links with relevant keywords found."}
 
-            # 2b: LLM selection from candidates
             html_content = await page.content()
             href_list_for_llm = [link['href'] for link in promising_links_objects]
             llm_link_choice_result = await self._extract_cookie_link_from_html(html_content, privacy_policy_url, href_list_for_llm)
             llm_chosen_link = llm_link_choice_result.get("cookie_policy_link")
-            logger.debug(f"LLM chose '{llm_chosen_link}' from candidate list.")
-
-            # 2c: Heuristic validation and override
+            
             final_candidate_url = None
             is_llm_choice_valid = any(llm_chosen_link in link_obj['href'] for link_obj in promising_links_objects) if llm_chosen_link else False
 
             if llm_chosen_link and is_llm_choice_valid:
                 final_candidate_url = llm_chosen_link
-                logger.info(f"LLM chose a valid candidate: {final_candidate_url}")
             else:
                 logger.warning("LLM choice was invalid or missing. Applying heuristic fallback.")
                 heuristic_choice = self._get_best_candidate(promising_links_objects, cookie_keywords)
                 if heuristic_choice:
                     final_candidate_url = heuristic_choice
-                    logger.info(f"Heuristic override selected: {final_candidate_url}")
                 else:
-                    logger.error("FATAL: Heuristic fallback failed to select a candidate.")
+                    logger.error("Heuristic fallback also failed to select a candidate.")
+                    if stage1_result:
+                        logger.info("Link search failed, returning Stage 1 result.")
+                        return stage1_result
                     return {"cookie_declaration_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
 
             full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
@@ -345,23 +345,29 @@ class PrivacyAnalyzer:
             validation_content = await validation_page.evaluate("document.body.innerText")
             if not validation_content:
                 logger.warning(f"Candidate page {full_candidate_url} has no text content to validate.")
+                if stage1_result:
+                    return stage1_result
                 return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
 
-            # Final LLM call (content checker)
             validation_llm_result = await self._ask_llm_about_cookie_declaration(validation_content)
 
             if validation_llm_result.get("has_cookie_declaration"):
-                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the cookie declaration. Reason: {validation_llm_result.get('reasoning')}")
+                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the cookie declaration. This is the preferred result.")
                 return {
                     "cookie_declaration_url": full_candidate_url,
                     "reasoning": f"Found and validated separate cookie policy at {full_candidate_url}."
                 }
             else:
-                logger.info(f"Validation failed for {full_candidate_url}. The page does not appear to be a cookie declaration. Reason: {validation_llm_result.get('reasoning')}")
-                return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed."}
+                logger.info(f"Validation of separate page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
+                if stage1_result:
+                    logger.info("Falling back to Stage 1 result.")
+                    return stage1_result
+                return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial declaration was found."}
 
         except Exception as e:
             logger.error(f"Error during multi-stage cookie declaration search for {privacy_policy_url}: {e}")
+            if stage1_result:
+                return stage1_result
             return {"cookie_declaration_url": None, "reasoning": f"An exception occurred: {e}"}
         finally:
             if page:
