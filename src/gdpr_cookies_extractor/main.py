@@ -246,7 +246,7 @@ async def gdpr_analysis(sites_df):
     async with async_playwright() as p:
         browser = await p.chromium.launch()
         context = await browser.new_context(
-            locale='en-GB',
+            locale='it-IT',
             timezone_id='Europe/Rome',
             geolocation={ "longitude": 12.4964, "latitude": 41.9028 },
             permissions=['geolocation'],

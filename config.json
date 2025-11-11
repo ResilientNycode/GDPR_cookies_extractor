@@ -32,18 +32,25 @@
     ],
     "cookie_declaration": [
       "cookies policy",
-      "cookies and technologies",
+      "cookies technologies",
       "use cookies",
       "technologies"
     ],
     "data_retention": [
       "data retention",
-      "how long we keep your data",
+      "how long keep data",
       "retention periods",
       "retain",
       "retantnion"
     ],
-    "data_deletion": ["delete", "erase", "clear", "manage", "dashboard"],
+    "data_deletion": [
+      "delete",
+      "erase",
+      "clear",
+      "manage",
+      "dashboard",
+      "processing information"
+    ],
     "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
   }
 }
