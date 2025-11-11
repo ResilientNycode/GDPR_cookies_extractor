@@ -5,6 +5,7 @@ from typing import Dict, Any, List, Optional
 from .llm_interface import AbstractLLMClient, LLMResponse 
 import asyncio
 from ..utils.html_cleaner import clean_html_for_link_extraction
+from ..utils.sitemap_parser import get_sitemap_urls
 
 logger = logging.getLogger(__name__)
 
@@ -137,12 +138,34 @@ class PrivacyAnalyzer:
             if page:
                 await page.close()
 
+    async def _get_sitemap_candidates(self, site_url: str, keywords: List[str]) -> List[str]:
+        """
+        Gets URLs from a sitemap and filters them by keywords.
+        """
+        logger.info("Attempting to find candidates from sitemap...")
+        try:
+            sitemap_urls = await get_sitemap_urls(site_url)
+            if not sitemap_urls:
+                logger.info("Sitemap is empty or could not be found.")
+                return []
+
+            lower_keywords = [k.lower() for k in keywords]
+            candidates = [
+                url for url in sitemap_urls 
+                if any(keyword in url.lower() for keyword in lower_keywords)
+            ]
+            
+            logger.info(f"Found {len(candidates)} candidates from sitemap.")
+            return candidates
+        except Exception as e:
+            logger.error(f"Error processing sitemap for {site_url}: {e}")
+            return []
+
     async def find_privacy_policy(self, context, site_url: str, filter_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
         """
         [ORCHESTRATOR FUNCTION]
         Orchestrates the search for the privacy policy URL.
-        It uses _analyze_page_for_policy for both the initial page
-        and the parallel fan-out search.
+        It first checks for a sitemap, then uses _analyze_page_for_policy.
         """
         found_policies = []
         initial_result = None
@@ -150,13 +173,31 @@ class PrivacyAnalyzer:
         try:
             logger.info(f"Starting privacy policy search for {site_url}...")
             
-            # Determine the root domain to check against redirects
             base_netloc = urlparse(site_url).netloc
             root_domain = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc
-            
-            # INITIAL ANALYSIS ---
+
+            # --- Sitemap Search (New Step) ---
+            if filter_keywords:
+                sitemap_candidates = await self._get_sitemap_candidates(site_url, filter_keywords)
+                sitemap_analysis_tasks = []
+                for candidate_url in sitemap_candidates:
+                    page = await context.new_page()
+                    task = self._analyze_page_for_policy(page, candidate_url, 0, root_domain, filter_keywords)
+                    sitemap_analysis_tasks.append(task)
+                
+                if sitemap_analysis_tasks:
+                    logger.info(f"Analyzing {len(sitemap_analysis_tasks)} candidates from sitemap in parallel.")
+                    results = await asyncio.gather(*sitemap_analysis_tasks)
+                    for result in results:
+                        if result and result.get("privacy_policy_url"):
+                            found_policies.append(result)
+
+            # If we found a high-confidence policy from the sitemap, we could return early.
+            # For now, we'll let it compete with the homepage analysis.
+
+            # --- Initial Page Analysis (Original Logic) ---
+            logger.info("Proceeding with initial page analysis.")
             initial_page = await context.new_page()
-            
             initial_result = await self._analyze_page_for_policy(
                 initial_page, site_url, 0, root_domain, filter_keywords
             )
@@ -207,7 +248,7 @@ class PrivacyAnalyzer:
 
         Analyze the text below:
         ---
-        {page_content} # Reverted to page_content
+        {page_content}
         ---
 
         Based on your analysis, you MUST return a single JSON object with the following structure:
