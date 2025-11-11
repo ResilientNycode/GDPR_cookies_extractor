@@ -4,6 +4,7 @@ from urllib.parse import urljoin, urlparse
 from typing import Dict, Any, List, Optional
 from .llm_interface import AbstractLLMClient, LLMResponse 
 import asyncio
+from ..utils.html_cleaner import clean_html_for_link_extraction
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,7 @@ class PrivacyAnalyzer:
         """
         Sends HTML content to the LLM to find the privacy policy URL on a single page.
         """
+        cleaned_html_content = clean_html_for_link_extraction(html_content)
         prompt = f"""
         You are an expert web analysis agent. Your task is to find the URL of the privacy policy page of this site {url}.
         
@@ -35,7 +37,7 @@ class PrivacyAnalyzer:
 
         The HTML content to analyze is below:
         ---
-        {html_content}
+        {cleaned_html_content}
         ---
         
         The URL of the page is: {url}
@@ -205,7 +207,7 @@ class PrivacyAnalyzer:
 
         Analyze the text below:
         ---
-        {page_content}
+        {page_content} # Reverted to page_content
         ---
 
         Based on your analysis, you MUST return a single JSON object with the following structure:
@@ -230,6 +232,7 @@ class PrivacyAnalyzer:
         """
         Sends HTML content and a list of candidate links to the LLM to find the best link to a separate cookie policy page.
         """
+        cleaned_html_content = clean_html_for_link_extraction(html_content)
         prompt = f"""
         You are an expert web analysis agent. Your task is to find a URL pointing to a "Cookie Policy" or "Cookie Declaration" page from the HTML content of the page: {url}.
 
@@ -241,7 +244,7 @@ class PrivacyAnalyzer:
 
         The HTML content to analyze is below:
         ---
-        {html_content}
+        {cleaned_html_content}
         ---
         
         The URL of the current page is: {url}
@@ -419,6 +422,7 @@ class PrivacyAnalyzer:
         """
         Sends HTML content and a list of candidate links to the LLM to find the best link to a separate data retention policy page.
         """
+        cleaned_html_content = clean_html_for_link_extraction(html_content)
         prompt = f"""
         You are an expert web analysis agent. Your task is to find a URL pointing to a "Data Retention Policy" or "Data Storage Information" page from the HTML content of the page: {url}.
 
@@ -430,7 +434,7 @@ class PrivacyAnalyzer:
 
         The HTML content to analyze is below:
         ---
-        {html_content}
+        {cleaned_html_content}
         ---
         
         The URL of the current page is: {url}
@@ -575,7 +579,7 @@ class PrivacyAnalyzer:
 
         1.  **Analyze for Policy:** First, determine if the text contains a specific section about data deletion or user rights to erasure. Look for headings like "Data Deletion", "Your Right to Erasure", "Deleting Your Information", or "Managing Your Data".
 
-        2.  **Extract Deletion Method:** If a data deletion section is found, carefully read it and extract a concise summary of the method for deleting data. For example: "Users can delete their data from their account settings dashboard", "A data deletion request can be sent to privacy@example.com", or "Data is deleted automatically upon account closure."
+        2.  **Extract Deletion Method:** If a data deletion section is found, carefully read it and extract a concise summary of the data deletion periods. For example: "Users can delete their data from their account settings dashboard", "A data deletion request can be sent to privacy@example.com", or "Data is deleted automatically upon account closure."
 
         **CRITICAL RULE:** Do NOT invent information. If the text does not explicitly state how to delete data, you MUST set the summary to null.
 
@@ -609,6 +613,7 @@ class PrivacyAnalyzer:
         """
         Sends HTML content and a list of candidate links to the LLM to find the best link to a separate data deletion page.
         """
+        cleaned_html_content = clean_html_for_link_extraction(html_content)
         prompt = f"""
         You are an expert web analysis agent. Your task is to find a URL pointing to a "Data Deletion", "Privacy Dashboard", or "Manage Your Data" page from the HTML content of the page: {url}.
 
@@ -620,7 +625,7 @@ class PrivacyAnalyzer:
 
         The HTML content to analyze is below:
         ---
-        {html_content}
+        {cleaned_html_content}
         ---
         
         The URL of the current page is: {url}
