@@ -751,6 +751,195 @@ class PrivacyAnalyzer:
             if validation_page:
                 await validation_page.close()
 
+    async def _ask_llm_about_dpo_declaration(self, page_content: str) -> Dict[str, Any]:
+        """
+        Asks the LLM to determine if the page content contains DPO information
+        and to extract contact details.
+        """
+        prompt = f"""
+        You are an expert in GDPR and web compliance. Your task is to analyze the following text to determine if it contains contact information for a Data Protection Officer (DPO) or a privacy representative.
+
+        1.  **Analyze for DPO Section:** Look for headings like "Data Protection Officer", "DPO", "Privacy Contact", "Data Controller", or "Contact Us for Privacy Matters".
+
+        2.  **Extract Contact Details:** If a relevant section is found, extract a concise summary of the contact methods. This can include:
+            - Email addresses (e.g., dpo@example.com, privacy@example.com)
+            - Physical mailing addresses.
+            - Links to contact forms.
+            - Phone numbers.
+
+        **CRITICAL RULE:** Do NOT invent information. If the text does not explicitly state contact details for a DPO or privacy representative, you MUST set the summary to null.
+
+        Analyze the text below:
+        ---
+        {page_content}
+        ---
+
+        Based on your analysis, you MUST return a single JSON object with the following structure:
+        {{
+          "has_dpo_declaration": <boolean>,
+          "reasoning": <string>,
+          "dpo_contact_summary": <string | null>
+        }}
+        - has_dpo_declaration: Set to true if you find a DPO or privacy contact section.
+        - reasoning: Briefly explain your decision.
+        - dpo_contact_summary: A concise summary of the contact details (email, address, form link). If no specific details are found, this MUST be null.
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "has_dpo_declaration": False,
+                "reasoning": f"LLM query failed: {response.error}",
+                "dpo_contact_summary": None
+            }
+        
+        return response.data
+
+    async def _extract_dpo_link_from_html(self, html_content: str, url: str, promising_links: List[str]) -> Dict[str, Any]:
+        """
+        Sends HTML content and a list of candidate links to the LLM to find the best link to a separate DPO/contact page.
+        """
+        prompt = f"""
+        You are an expert web analysis agent. Your task is to find a URL pointing to a "Data Protection Officer (DPO)", "Privacy Contact", or "Data Controller" page from the HTML content of the page: {url}.
+
+        A pre-filtered list of candidate links has been provided: {promising_links}.
+        **CRITICAL RULE: If the candidate link list is not empty, you MUST choose the best and most relevant option from that list. Only if the candidates list is empty you can search in the full HTML content.** 
+
+        Look for anchor tags `<a>` with text like "DPO", "Data Protection Officer", "Contact our DPO", "Privacy Contact", or similar phrases.
+
+        The HTML content to analyze is below:
+        ---
+        {html_content}
+        ---
+        
+        The URL of the current page is: {url}
+
+        You MUST return a single JSON object and nothing else.
+        Return your answer as a single JSON object with the following structure:
+        {{
+          "dpo_policy_link": <string | null>,
+          "reasoning": <string>,
+          "confidence_score": <number>
+        }}
+        - dpo_policy_link: Must be the absolute or relative URL to the DPO contact page. If no link is found, this MUST be null.
+        - reasoning: Explain your choice.
+        - confidence_score: A number from 0.0 to 1.0 indicating your certainty.
+        """
+        response = await self.llm_client.query_json(user_prompt=prompt)
+        
+        if not response.success:
+            return {
+                "dpo_policy_link": None,
+                "reasoning": response.error,
+                "confidence_score": 0.0
+            }
+        
+        return response.data
+
+    async def find_dpo_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+        """
+        Finds the DPO contact page using a multi-stage hybrid analysis.
+        """
+        if not privacy_policy_url:
+            return {"dpo_url": None, "reasoning": "No privacy policy URL provided."}
+
+        page = None
+        validation_page = None
+        stage1_result = None
+        try:
+            # --- Stage 1: Analyze the initial privacy policy page for content ---
+            logger.info(f"Stage 1: Analyzing for DPO information ON the page: {privacy_policy_url}")
+            page = await context.new_page()
+            await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
+            
+            page_content = await page.evaluate("document.body.innerText")
+            if not page_content:
+                logger.warning(f"Initial page {privacy_policy_url} has no text content.")
+            else:
+                llm_content_result = await self._ask_llm_about_dpo_declaration(page_content)
+                if llm_content_result.get("has_dpo_declaration"):
+                    logger.info(f"Stage 1 SUCCESS: Found DPO info directly on {privacy_policy_url}. Storing result.")
+                    stage1_result = {
+                        "dpo_url": privacy_policy_url,
+                        "reasoning": llm_content_result.get('reasoning'),
+                        "dpo_contact_summary": llm_content_result.get('dpo_contact_summary')
+                    }
+            
+            logger.info("Stage 2: Starting HYBRID search for a separate DPO contact link.")
+
+            # --- Stage 2: Hybrid model to find the best candidate link ---
+            dpo_keywords = search_keywords_config.get('dpo', [])
+            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, dpo_keywords)
+            
+            if not promising_links_objects:
+                logger.info("No promising links found for a separate DPO page.")
+                if stage1_result:
+                    logger.info("No separate link found, returning Stage 1 result.")
+                    return stage1_result
+                return {"dpo_url": None, "reasoning": "DPO info not on page, and no links with relevant keywords found."}
+
+            html_content = await page.content()
+            href_list_for_llm = [link['href'] for link in promising_links_objects]
+            llm_link_choice_result = await self._extract_dpo_link_from_html(html_content, privacy_policy_url, href_list_for_llm)
+            llm_chosen_link = llm_link_choice_result.get("dpo_policy_link")
+
+            final_candidate_url = None
+            is_llm_choice_valid = any(llm_chosen_link in link_obj['href'] for link_obj in promising_links_objects) if llm_chosen_link else False
+
+            if llm_chosen_link and is_llm_choice_valid:
+                final_candidate_url = llm_chosen_link
+            else:
+                logger.warning("LLM choice for DPO was invalid or missing. Applying heuristic fallback.")
+                heuristic_choice = self._get_best_candidate(promising_links_objects, dpo_keywords)
+                if heuristic_choice:
+                    final_candidate_url = heuristic_choice
+                else:
+                    logger.error("Heuristic fallback for DPO also failed.")
+                    if stage1_result:
+                        return stage1_result
+                    return {"dpo_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
+
+            full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
+            logger.info(f"Hybrid model selected DPO link: {full_candidate_url}. Stage 3: Validating content.")
+
+            # --- Stage 3: Validate the content of the final candidate page ---
+            validation_page = await context.new_page()
+            await validation_page.goto(full_candidate_url, timeout=60000, wait_until="domcontentloaded")
+            
+            validation_content = await validation_page.evaluate("document.body.innerText")
+            if not validation_content:
+                logger.warning(f"Candidate DPO page {full_candidate_url} has no text content.")
+                if stage1_result:
+                    return stage1_result
+                return {"dpo_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+
+            validation_llm_result = await self._ask_llm_about_dpo_declaration(validation_content)
+
+            if validation_llm_result.get("has_dpo_declaration"):
+                logger.info(f"SUCCESS: Confirmed that {full_candidate_url} contains the DPO information. This is the preferred result.")
+                return {
+                    "dpo_url": full_candidate_url,
+                    "reasoning": f"Found and validated separate DPO page at {full_candidate_url}.",
+                    "dpo_contact_summary": validation_llm_result.get('dpo_contact_summary')
+                }
+            else:
+                logger.info(f"Validation of separate DPO page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
+                if stage1_result:
+                    logger.info("Falling back to Stage 1 result for DPO information.")
+                    return stage1_result
+                return {"dpo_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial DPO info was found."}
+
+        except Exception as e:
+            logger.error(f"Error during DPO page search for {privacy_policy_url}: {e}")
+            if stage1_result:
+                return stage1_result
+            return {"dpo_url": None, "reasoning": f"An exception occurred: {e}"}
+        finally:
+            if page:
+                await page.close()
+            if validation_page:
+                await validation_page.close()
+
     # --- Cookie Analysis Methods ---
     async def categorize_cookies(self, cookies_data: list):
         """

@@ -51,6 +51,13 @@
       "dashboard",
       "processing information"
     ],
-    "dpo": ["dpo", "data protection", "governance", "legal", "contact"]
+    "dpo": [
+      "dpo",
+      "data protection",
+      "governance",
+      "legal",
+      "contact",
+      "officer"
+    ]
   }
 }

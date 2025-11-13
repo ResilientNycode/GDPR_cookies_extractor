@@ -34,9 +34,19 @@ class SiteAnalysisResult:
         llm_output: dict,
         privacy_policy_url: Optional[str] = None,
         simple_extractor_links: Optional[List[str]] = None,
+        cookie_declaration: Optional[Dict[str, Any]] = None,
+        data_retention: Optional[Dict[str, Any]] = None,
+        data_deletion: Optional[Dict[str, Any]] = None,
+        dpo: Optional[Dict[str, Any]] = None,
         **analyses: Dict[str, Any]
     ) -> "SiteAnalysisResult":
         
+        # Ensure the main analyses are included
+        analyses['cookie_declaration'] = cookie_declaration
+        analyses['data_retention'] = data_retention
+        analyses['data_deletion'] = data_deletion
+        analyses['dpo'] = dpo
+
         return SiteAnalysisResult(
             website_url=site_url,
             scenario=scenario,
