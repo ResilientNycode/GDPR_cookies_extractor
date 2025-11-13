@@ -144,8 +144,11 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
     except Exception as e:
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
+    finally:
+        if context:
+            await context.close()
 
-async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, context, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
+async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, browser, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> List[SiteAnalysisResult]:
     """
     Creates and runs all analysis tasks concurrently.
     """
@@ -159,6 +162,14 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, co
             site_url = "https://" + site_url
             
         for scenario in scenarios:
+            # Create a new context for each task to ensure isolation
+            context = await browser.new_context(
+                locale='en-US',
+                timezone_id='Europe/Rome',
+                geolocation={ "longitude": 12.4964, "latitude": 41.9028 },
+                permissions=['geolocation'],
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"
+            )
             tasks.append(
                 process_site_scenario(context, analyzer, site_url, scenario, timestamp, search_keywords_config)
             )
@@ -245,17 +256,9 @@ async def gdpr_analysis(sites_df):
     
     async with async_playwright() as p:
         browser = await p.chromium.launch()
-        context = await browser.new_context(
-            locale='en-US',
-            timezone_id='Europe/Rome',
-            geolocation={ "longitude": 12.4964, "latitude": 41.9028 },
-            permissions=['geolocation'],
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"
-        )
         
-        all_results = await run_all_analyses(sites_df, analyzer, context, timestamp, search_keywords_config)
+        all_results = await run_all_analyses(sites_df, analyzer, browser, timestamp, search_keywords_config)
         
-        await context.close()
         await browser.close()
     
     save_results(all_results, timestamp)
