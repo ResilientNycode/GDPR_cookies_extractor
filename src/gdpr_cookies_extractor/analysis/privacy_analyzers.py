@@ -839,12 +839,14 @@ class PrivacyAnalyzer:
         base_netloc = urlparse(site_url).netloc
         root_domain = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc 
         
+        base_url_for_join = page.url # Use the actual current URL of the page
+        
         for a in await page.query_selector_all('a'):
             href = None
             try:
                 href = await a.get_attribute('href')
                 if href:
-                    full_url = urljoin(site_url, href)
+                    full_url = urljoin(base_url_for_join, href)
                     
                     # Avoid duplicates
                     if full_url in unique_hrefs:
