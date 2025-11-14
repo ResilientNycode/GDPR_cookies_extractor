@@ -171,7 +171,7 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
         for scenario in scenarios:
             # Create a new context for each task to ensure isolation
             context = await browser.new_context(
-                locale='en-US',
+                locale='it-IT',
                 timezone_id='Europe/Rome',
                 geolocation={ "longitude": 12.4964, "latitude": 41.9028 },
                 permissions=['geolocation'],
