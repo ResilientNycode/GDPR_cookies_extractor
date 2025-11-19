@@ -31,8 +31,8 @@ def sanitize_filename(url: str) -> str:
     return sanitized
 
 
-async def dump_data(current_url: str, scenario: str, cookies: list, context, full_privacy_policy_url: Optional[str], timestamp: str):
-    """Dumps cookies to a JSON file and the privacy policy to an HTML file."""
+async def dump_data(current_url: str, scenario: str, cookies: list, context, full_privacy_policy_url: Optional[str], initial_page_url: str, timestamp: str):
+    """Dumps cookies to a JSON file, the privacy policy to an HTML file, and the initial page HTML."""
     sanitized_url = sanitize_filename(current_url)
     dump_dir = f"output/dumps/analysis_results_{timestamp}"
     os.makedirs(dump_dir, exist_ok=True)
@@ -42,6 +42,18 @@ async def dump_data(current_url: str, scenario: str, cookies: list, context, ful
     with open(cookie_dump_path, "w") as f:
         json.dump(cookies, f, indent=4)
     logger.info(f"Dumped {len(cookies)} cookies to {cookie_dump_path}")
+
+    # Dump initial page HTML
+    try:
+        async with await context.new_page() as initial_page_dump:
+            await initial_page_dump.goto(initial_page_url, wait_until="domcontentloaded", timeout=60000)
+            initial_html = await initial_page_dump.content()
+            initial_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_initial_page.html"
+            with open(initial_dump_path, "w", encoding="utf-8") as f:
+                f.write(initial_html)
+            logger.info(f"Dumped initial page HTML to {initial_dump_path}")
+    except Exception as e:
+        logger.error(f"Failed to dump initial page HTML for {initial_page_url}: {e}")
 
     # Dump privacy policy
     if full_privacy_policy_url:
@@ -86,12 +98,12 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
             third_party_count = count_third_party_cookies(current_url, cookies)
 
             # Find Privacy Policy Page
-            llm_output = await analyzer.find_privacy_policy(
+            llm_output, privacy_policy_links = await analyzer.find_privacy_policy(
                 context, current_url, 
                 filter_keywords=search_keywords_config.get('privacy_policy', []),
             )
 
-
+            simple_extractor_links = {"privacy_policy": privacy_policy_links}
             analyses_results = {}
             full_privacy_policy_url = None
             
@@ -121,10 +133,16 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
                 )
 
                 results = await asyncio.gather(cookie_declaration_task, data_retention_task, data_deletion_task, dpo_task)
-                cookie_decl_res = results[0]
-                data_retention_res = results[1]
-                data_deletion_res = results[2]
-                dpo_res = results[3]
+                
+                cookie_decl_res, cookie_decl_links = results[0]
+                data_retention_res, data_retention_links = results[1]
+                data_deletion_res, data_deletion_links = results[2]
+                dpo_res, dpo_links = results[3]
+
+                simple_extractor_links["cookie_declaration"] = cookie_decl_links
+                simple_extractor_links["data_retention"] = data_retention_links
+                simple_extractor_links["data_deletion"] = data_deletion_links
+                simple_extractor_links["dpo"] = dpo_links
                 
                 # Collect results into the extensible dictionary
                 analyses_results = {
@@ -134,7 +152,7 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
                     "dpo": dpo_res
                 }
 
-            await dump_data(current_url, scenario, cookies, context, full_privacy_policy_url, timestamp)
+            await dump_data(current_url, scenario, cookies, context, full_privacy_policy_url, site_url, timestamp)
             
             # Format Success Result ---
             return SiteAnalysisResult.from_outputs(
@@ -145,6 +163,7 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
                 third_party_count=third_party_count,
                 llm_output=llm_output,
                 privacy_policy_url=full_privacy_policy_url,
+                simple_extractor_links=simple_extractor_links,
                 **analyses_results
             )
 

@@ -22,7 +22,7 @@ class SiteAnalysisResult:
     analyses: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     
     # Other collected data
-    simple_extractor_links: Optional[List[str]] = None
+    simple_extractor_links: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
 
     @staticmethod
     def from_outputs(
@@ -33,7 +33,7 @@ class SiteAnalysisResult:
         third_party_count: int,
         llm_output: dict,
         privacy_policy_url: Optional[str] = None,
-        simple_extractor_links: Optional[List[str]] = None,
+        simple_extractor_links: Optional[Dict[str, List[Dict[str, Any]]]] = None,
         cookie_declaration: Optional[Dict[str, Any]] = None,
         data_retention: Optional[Dict[str, Any]] = None,
         data_deletion: Optional[Dict[str, Any]] = None,
@@ -56,7 +56,7 @@ class SiteAnalysisResult:
             third_party_cookies_count=third_party_count,
             raw_cookies_data=cookies,
             categorized_cookies=cookie_categories.get("cookie_categories", []),
-            simple_extractor_links=simple_extractor_links,
+            simple_extractor_links=simple_extractor_links if simple_extractor_links is not None else {},
             analyses=analyses
         )
 

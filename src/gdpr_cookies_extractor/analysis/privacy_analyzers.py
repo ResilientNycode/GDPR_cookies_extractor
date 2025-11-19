@@ -1,7 +1,7 @@
 import json
 import logging
 from urllib.parse import urljoin, urlparse
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, Tuple
 from .llm_interface import AbstractLLMClient, LLMResponse 
 import asyncio
 
@@ -63,13 +63,14 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         [WORKER FUNCTION]
         Analyzes a SINGLE page (URL) for a policy link, validates the LLM's choice, and calculates a keyword bonus.
         This is the atomic work unit for policy search.
         """
         html_lower = ""
+        link_extraction_phases = []
         try:
             logger.info(f"Analyzing page (Hop {hop_num}): {url}")
             if not page.url == url:
@@ -79,11 +80,17 @@ class PrivacyAnalyzer:
             promising_links_objects = await self._filter_internal_links(page, url, user_keywords)
             logger.debug(f"Internal links found: {promising_links_objects}")
 
+            link_extraction_phases.append({
+                "main_link": url,
+                "phase": f"find_privacy_policy_hop_{hop_num}",
+                "extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             # Check for external redirect after navigation
             final_netloc = urlparse(page.url).netloc
             if not (final_netloc == original_root_domain or final_netloc.endswith("." + original_root_domain)):
                 logger.warning(f"Redirected to external domain: {page.url}. Skipping analysis.")
-                return {"privacy_policy_url": None, "reasoning": f"Redirected to external domain {page.url}", "confidence_score": 0.0, "keyword_bonus": 0.0}
+                return {"privacy_policy_url": None, "reasoning": f"Redirected to external domain {page.url}", "confidence_score": 0.0, "keyword_bonus": 0.0}, link_extraction_phases
 
             html = await page.content()
             html_lower = html.lower()
@@ -126,16 +133,16 @@ class PrivacyAnalyzer:
             if found_url:
                 policy_output["privacy_policy_url"] = urljoin(url, found_url)
 
-            return policy_output
+            return policy_output, link_extraction_phases
         
         except Exception as e:
             logger.error(f"Error analyzing page {url}: {e}")
-            return {"privacy_policy_url": None, "reasoning": f"Failed to analyze page {url}: {e}", "confidence_score": 0.0, "keyword_bonus": 0.0}
+            return {"privacy_policy_url": None, "reasoning": f"Failed to analyze page {url}: {e}", "confidence_score": 0.0, "keyword_bonus": 0.0}, []
         finally:
             if page:
                 await page.close()
 
-    async def find_privacy_policy(self, context, site_url: str, filter_keywords: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def find_privacy_policy(self, context, site_url: str, filter_keywords: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         [ORCHESTRATOR FUNCTION]
         Orchestrates the search for the privacy policy URL.
@@ -144,6 +151,7 @@ class PrivacyAnalyzer:
         """
         found_policies = []
         initial_result = None
+        link_extraction_phases = []
         
         try:
             logger.info(f"Starting privacy policy search for {site_url}...")
@@ -155,9 +163,10 @@ class PrivacyAnalyzer:
             # INITIAL ANALYSIS ---
             initial_page = await context.new_page()
             
-            initial_result = await self._analyze_page_for_policy(
+            initial_result, initial_links = await self._analyze_page_for_policy(
                 initial_page, site_url, 0, root_domain, filter_keywords
             )
+            link_extraction_phases.extend(initial_links)
             
             if initial_result and initial_result.get("privacy_policy_url"):
                 found_policies.append(initial_result)
@@ -176,15 +185,15 @@ class PrivacyAnalyzer:
                 hybrid_score = calculate_hybrid_score(best_policy)
                 
                 logger.info(f"Selected best privacy policy with hybrid score {hybrid_score:.2f}: {best_policy.get('privacy_policy_url')}")
-                return best_policy
+                return best_policy, link_extraction_phases
 
             # If no policies were found at all, return the (empty) initial result
             logger.info("No privacy policy found after deep search.")
-            return initial_result
+            return initial_result, link_extraction_phases
         
         except Exception as e:
             logger.error(f"Critical error during privacy policy search for {site_url}: {e}")
-            return {"reasoning": f"Failed during privacy policy search: {e}", "privacy_policy_url": None}
+            return {"reasoning": f"Failed during privacy policy search: {e}", "privacy_policy_url": None}, []
 
     async def _ask_llm_about_cookie_declaration(self, page_content: str) -> Dict[str, Any]:
         """
@@ -268,7 +277,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the cookie declaration page using a multi-stage hybrid analysis.
         1.  Check if the declaration is on the initial privacy policy page.
@@ -277,11 +286,12 @@ class PrivacyAnalyzer:
         4.  Prefer the dedicated page if found and validated, otherwise fall back to the initial page.
         """
         if not privacy_policy_url:
-            return {"cookie_declaration_url": None, "reasoning": "No privacy policy URL provided."}
+            return {"cookie_declaration_url": None, "reasoning": "No privacy policy URL provided."}, []
 
         page = None
         validation_page = None
         stage1_result = None
+        link_extraction_phases = []
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for cookie declaration ON the page: {privacy_policy_url}")
@@ -306,12 +316,18 @@ class PrivacyAnalyzer:
             cookie_keywords = search_keywords_config.get('cookie_declaration', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, cookie_keywords)
             
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": "find_cookie_declaration_page_stage_2",
+                "extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             if not promising_links_objects:
                 logger.info("No promising links found for a separate page.")
                 if stage1_result:
                     logger.info("No separate link found, returning Stage 1 result.")
-                    return stage1_result
-                return {"cookie_declaration_url": None, "reasoning": "Declaration not on page, and no links with relevant keywords found."}
+                    return stage1_result, link_extraction_phases
+                return {"cookie_declaration_url": None, "reasoning": "Declaration not on page, and no links with relevant keywords found."}, link_extraction_phases
 
             html_content = await page.content()
             href_list_for_llm = [link['href'] for link in promising_links_objects]
@@ -332,8 +348,8 @@ class PrivacyAnalyzer:
                     logger.error("Heuristic fallback also failed to select a candidate.")
                     if stage1_result:
                         logger.info("Link search failed, returning Stage 1 result.")
-                        return stage1_result
-                    return {"cookie_declaration_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
+                        return stage1_result, link_extraction_phases
+                    return {"cookie_declaration_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}, link_extraction_phases
 
             full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
             logger.info(f"Hybrid model selected link: {full_candidate_url}. Stage 3: Validating content.")
@@ -346,8 +362,8 @@ class PrivacyAnalyzer:
             if not validation_content:
                 logger.warning(f"Candidate page {full_candidate_url} has no text content to validate.")
                 if stage1_result:
-                    return stage1_result
-                return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+                    return stage1_result, link_extraction_phases
+                return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}, link_extraction_phases
 
             validation_llm_result = await self._ask_llm_about_cookie_declaration(validation_content)
 
@@ -356,19 +372,19 @@ class PrivacyAnalyzer:
                 return {
                     "cookie_declaration_url": full_candidate_url,
                     "reasoning": f"Found and validated separate cookie policy at {full_candidate_url}."
-                }
+                }, link_extraction_phases
             else:
                 logger.info(f"Validation of separate page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
                 if stage1_result:
                     logger.info("Falling back to Stage 1 result.")
-                    return stage1_result
-                return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial declaration was found."}
+                    return stage1_result, link_extraction_phases
+                return {"cookie_declaration_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial declaration was found."}, link_extraction_phases
 
         except Exception as e:
             logger.error(f"Error during multi-stage cookie declaration search for {privacy_policy_url}: {e}")
             if stage1_result:
-                return stage1_result
-            return {"cookie_declaration_url": None, "reasoning": f"An exception occurred: {e}"}
+                return stage1_result, link_extraction_phases
+            return {"cookie_declaration_url": None, "reasoning": f"An exception occurred: {e}"}, link_extraction_phases
         finally:
             if page:
                 await page.close()
@@ -457,7 +473,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_data_retention_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+    async def find_data_retention_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the data retention page using a multi-stage hybrid analysis, mirroring the cookie declaration search logic.
         1.  Check if the declaration is on the initial privacy policy page.
@@ -466,11 +482,12 @@ class PrivacyAnalyzer:
         4.  Prefer the dedicated page if found and validated, otherwise fall back to the initial page.
         """
         if not privacy_policy_url:
-            return {"data_retention_url": None, "reasoning": "No privacy policy URL provided."}
+            return {"data_retention_url": None, "reasoning": "No privacy policy URL provided."}, []
 
         page = None
         validation_page = None
         stage1_result = None
+        link_extraction_phases = []
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for data retention ON the page: {privacy_policy_url}")
@@ -496,12 +513,18 @@ class PrivacyAnalyzer:
             data_retention_keywords = search_keywords_config.get('data_retention', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_retention_keywords)
             
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": "find_data_retention_page_stage_2",
+                "extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             if not promising_links_objects:
                 logger.info("No promising links found for a separate data retention page.")
                 if stage1_result:
                     logger.info("No separate link found, returning Stage 1 result.")
-                    return stage1_result
-                return {"data_retention_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}
+                    return stage1_result, link_extraction_phases
+                return {"data_retention_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}, link_extraction_phases
 
             html_content = await page.content()
             href_list_for_llm = [link['href'] for link in promising_links_objects]
@@ -521,8 +544,8 @@ class PrivacyAnalyzer:
                 else:
                     logger.error("Heuristic fallback for data retention also failed.")
                     if stage1_result:
-                        return stage1_result
-                    return {"data_retention_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
+                        return stage1_result, link_extraction_phases
+                    return {"data_retention_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}, link_extraction_phases
 
             full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
             logger.info(f"Hybrid model selected data retention link: {full_candidate_url}. Stage 3: Validating content.")
@@ -535,8 +558,8 @@ class PrivacyAnalyzer:
             if not validation_content:
                 logger.warning(f"Candidate data retention page {full_candidate_url} has no text content.")
                 if stage1_result:
-                    return stage1_result
-                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+                    return stage1_result, link_extraction_phases
+                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}, link_extraction_phases
 
             validation_llm_result = await self._ask_llm_about_data_retention_declaration(validation_content)
 
@@ -546,19 +569,19 @@ class PrivacyAnalyzer:
                     "data_retention_url": full_candidate_url,
                     "reasoning": f"Found and validated separate data retention policy at {full_candidate_url}.",
                     "retention_period_summary": validation_llm_result.get('retention_period_summary')
-                }
+                }, link_extraction_phases
             else:
                 logger.info(f"Validation of separate data retention page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
                 if stage1_result:
                     logger.info("Falling back to Stage 1 result for data retention.")
-                    return stage1_result
-                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial policy was found."}
+                    return stage1_result, link_extraction_phases
+                return {"data_retention_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial policy was found."}, link_extraction_phases
 
         except Exception as e:
             logger.error(f"Error during data retention page search for {privacy_policy_url}: {e}")
             if stage1_result:
-                return stage1_result
-            return {"data_retention_url": None, "reasoning": f"An exception occurred: {e}"}
+                return stage1_result, link_extraction_phases
+            return {"data_retention_url": None, "reasoning": f"An exception occurred: {e}"}, link_extraction_phases
         finally:
             if page:
                 await page.close()
@@ -647,16 +670,17 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_data_deletion_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+    async def find_data_deletion_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the data deletion page using a multi-stage hybrid analysis.
         """
         if not privacy_policy_url:
-            return {"data_deletion_url": None, "reasoning": "No privacy policy URL provided."}
+            return {"data_deletion_url": None, "reasoning": "No privacy policy URL provided."}, []
 
         page = None
         validation_page = None
         stage1_result = None
+        link_extraction_phases = []
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for data deletion ON the page: {privacy_policy_url}")
@@ -682,12 +706,18 @@ class PrivacyAnalyzer:
             data_deletion_keywords = search_keywords_config.get('data_deletion', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_deletion_keywords)
             
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": "find_data_deletion_page_stage_2",
+                "extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             if not promising_links_objects:
                 logger.info("No promising links found for a separate data deletion page.")
                 if stage1_result:
                     logger.info("No separate link found, returning Stage 1 result.")
-                    return stage1_result
-                return {"data_deletion_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}
+                    return stage1_result, link_extraction_phases
+                return {"data_deletion_url": None, "reasoning": "Policy not on page, and no links with relevant keywords found."}, link_extraction_phases
 
             html_content = await page.content()
             href_list_for_llm = [link['href'] for link in promising_links_objects]
@@ -707,8 +737,8 @@ class PrivacyAnalyzer:
                 else:
                     logger.error("Heuristic fallback for data deletion also failed.")
                     if stage1_result:
-                        return stage1_result
-                    return {"data_deletion_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
+                        return stage1_result, link_extraction_phases
+                    return {"data_deletion_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}, link_extraction_phases
 
             full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
             logger.info(f"Hybrid model selected data deletion link: {full_candidate_url}. Stage 3: Validating content.")
@@ -721,8 +751,8 @@ class PrivacyAnalyzer:
             if not validation_content:
                 logger.warning(f"Candidate data deletion page {full_candidate_url} has no text content.")
                 if stage1_result:
-                    return stage1_result
-                return {"data_deletion_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+                    return stage1_result, link_extraction_phases
+                return {"data_deletion_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}, link_extraction_phases
 
             validation_llm_result = await self._ask_llm_about_data_deletion_declaration(validation_content)
 
@@ -732,19 +762,19 @@ class PrivacyAnalyzer:
                     "data_deletion_url": full_candidate_url,
                     "reasoning": f"Found and validated separate data deletion policy at {full_candidate_url}.",
                     "deletion_method_summary": validation_llm_result.get('deletion_method_summary')
-                }
+                }, link_extraction_phases
             else:
                 logger.info(f"Validation of separate data deletion page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
                 if stage1_result:
                     logger.info("Falling back to Stage 1 result for data deletion.")
-                    return stage1_result
-                return {"data_deletion_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial policy was found."}
+                    return stage1_result, link_extraction_phases
+                return {"data_deletion_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial policy was found."}, link_extraction_phases
 
         except Exception as e:
             logger.error(f"Error during data deletion page search for {privacy_policy_url}: {e}")
             if stage1_result:
-                return stage1_result
-            return {"data_deletion_url": None, "reasoning": f"An exception occurred: {e}"}
+                return stage1_result, link_extraction_phases
+            return {"data_deletion_url": None, "reasoning": f"An exception occurred: {e}"}, link_extraction_phases
         finally:
             if page:
                 await page.close()
@@ -836,16 +866,17 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_dpo_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Dict[str, Any]:
+    async def find_dpo_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the DPO contact page using a multi-stage hybrid analysis.
         """
         if not privacy_policy_url:
-            return {"dpo_url": None, "reasoning": "No privacy policy URL provided."}
+            return {"dpo_url": None, "reasoning": "No privacy policy URL provided."}, []
 
         page = None
         validation_page = None
         stage1_result = None
+        link_extraction_phases = []
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for DPO information ON the page: {privacy_policy_url}")
@@ -871,12 +902,18 @@ class PrivacyAnalyzer:
             dpo_keywords = search_keywords_config.get('dpo', [])
             promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, dpo_keywords)
             
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": "find_dpo_page_stage_2",
+                "extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             if not promising_links_objects:
                 logger.info("No promising links found for a separate DPO page.")
                 if stage1_result:
                     logger.info("No separate link found, returning Stage 1 result.")
-                    return stage1_result
-                return {"dpo_url": None, "reasoning": "DPO info not on page, and no links with relevant keywords found."}
+                    return stage1_result, link_extraction_phases
+                return {"dpo_url": None, "reasoning": "DPO info not on page, and no links with relevant keywords found."}, link_extraction_phases
 
             html_content = await page.content()
             href_list_for_llm = [link['href'] for link in promising_links_objects]
@@ -896,8 +933,8 @@ class PrivacyAnalyzer:
                 else:
                     logger.error("Heuristic fallback for DPO also failed.")
                     if stage1_result:
-                        return stage1_result
-                    return {"dpo_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}
+                        return stage1_result, link_extraction_phases
+                    return {"dpo_url": None, "reasoning": "LLM and heuristic both failed to choose a link."}, link_extraction_phases
 
             full_candidate_url = urljoin(privacy_policy_url, final_candidate_url)
             logger.info(f"Hybrid model selected DPO link: {full_candidate_url}. Stage 3: Validating content.")
@@ -910,8 +947,8 @@ class PrivacyAnalyzer:
             if not validation_content:
                 logger.warning(f"Candidate DPO page {full_candidate_url} has no text content.")
                 if stage1_result:
-                    return stage1_result
-                return {"dpo_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}
+                    return stage1_result, link_extraction_phases
+                return {"dpo_url": None, "reasoning": f"Found link {full_candidate_url}, but the page was empty."}, link_extraction_phases
 
             validation_llm_result = await self._ask_llm_about_dpo_declaration(validation_content)
 
@@ -921,19 +958,19 @@ class PrivacyAnalyzer:
                     "dpo_url": full_candidate_url,
                     "reasoning": f"Found and validated separate DPO page at {full_candidate_url}.",
                     "dpo_contact_summary": validation_llm_result.get('dpo_contact_summary')
-                }
+                }, link_extraction_phases
             else:
                 logger.info(f"Validation of separate DPO page {full_candidate_url} failed. Reason: {validation_llm_result.get('reasoning')}")
                 if stage1_result:
                     logger.info("Falling back to Stage 1 result for DPO information.")
-                    return stage1_result
-                return {"dpo_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial DPO info was found."}
+                    return stage1_result, link_extraction_phases
+                return {"dpo_url": None, "reasoning": f"Found link {full_candidate_url}, but content validation failed and no initial DPO info was found."}, link_extraction_phases
 
         except Exception as e:
             logger.error(f"Error during DPO page search for {privacy_policy_url}: {e}")
             if stage1_result:
-                return stage1_result
-            return {"dpo_url": None, "reasoning": f"An exception occurred: {e}"}
+                return stage1_result, link_extraction_phases
+            return {"dpo_url": None, "reasoning": f"An exception occurred: {e}"}, link_extraction_phases
         finally:
             if page:
                 await page.close()
