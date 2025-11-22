@@ -78,7 +78,6 @@ class PrivacyAnalyzer:
 
             # Step 1: Get heuristic candidates as rich objects ({href, text})
             promising_links_objects = await self._filter_internal_links(page, url, user_keywords)
-            logger.debug(f"Internal links found: {promising_links_objects}")
 
             link_extraction_phases.append({
                 "main_link": url,
@@ -1094,6 +1093,7 @@ class PrivacyAnalyzer:
             except Exception as e:
                 logger.debug(f"Could not process link {href}: {e}")
 
+        logger.debug(f"Internal links found on page {full_url}: {links}")
         return links
     
     def _get_best_candidate(self, promising_links: List[Dict[str, str]], keyword_priority_list: List[str]) -> Optional[str]:
