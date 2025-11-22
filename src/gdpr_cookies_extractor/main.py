@@ -74,8 +74,9 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
     Runs the full analysis for a single site and a single cookie scenario.
     Returns a SiteAnalysisResult object.
     """
-    logger.info(f"Processing: {site_url} (Scenario: {scenario})")
     try:
+        set_log_context(site_url, scenario)
+        logger.info(f"Processing: {site_url} (Scenario: {scenario})")
         async with await context.new_page() as page:
             # Navigation and Cookie Handling 
             await page.goto(site_url, wait_until="domcontentloaded", timeout=60000)
@@ -171,6 +172,7 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
         logger.error(f"FATAL Error processing {site_url} ('{scenario}'): {e}")
         return SiteAnalysisResult.from_exception(site_url, scenario, e)
     finally:
+        clear_log_context()
         if context:
             await context.close()
 
