@@ -1,5 +1,7 @@
 import json
 import logging
+import re
+import os
 from urllib.parse import urljoin, urlparse
 from typing import Dict, Any, List, Optional, Tuple
 from .llm_interface import AbstractLLMClient, LLMResponse 
@@ -12,10 +14,34 @@ class PrivacyAnalyzer:
     Analyzes privacy policies and cookie data using a provided LLM client.
     """
     
-    def __init__(self, llm_client: AbstractLLMClient, max_hops: int = 3):
+    def __init__(self, llm_client: AbstractLLMClient, timestamp: str, max_hops: int = 3):
         self.llm_client = llm_client
         self.max_hops = max_hops
+        self.timestamp = timestamp
         logger.info(f"PrivacyAnalyzer initialized with client: {type(llm_client).__name__} and max_hops: {max_hops}")
+
+    async def _dump_snapshot(self, page, site_dump_folder: str, phase: str, all_links: List[Dict]):
+        """Dumps the HTML and all extracted links for a specific analysis phase."""
+        try:
+            # Ensure the site-specific dump directory exists
+            os.makedirs(site_dump_folder, exist_ok=True)
+            
+            # Dump HTML
+            html_content = await page.content()
+            html_dump_path = os.path.join(site_dump_folder, f"{phase}.html")
+            with open(html_dump_path, "w", encoding="utf-8") as f:
+                f.write(html_content)
+
+            # Dump all links
+            links_dump_path = os.path.join(site_dump_folder, f"{phase}_links.json")
+            with open(links_dump_path, "w", encoding="utf-8") as f:
+                json.dump(all_links, f, indent=4, ensure_ascii=False)
+            
+            logger.info(f"Dumped snapshot for phase '{phase}' to {site_dump_folder}")
+
+        except Exception as e:
+            logger.error(f"Failed to dump snapshot for phase '{phase}': {e}")
+
 
     async def _extract_policy_url_from_html(self, html_content: str, url: str, promising_links: List[str]):
     # --- Privacy Policy Methods ---
@@ -63,7 +89,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def _analyze_page_for_policy(self, page, url: str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    async def _analyze_page_for_policy(self, page, url: str, site_dump_folder:str, hop_num: int, original_root_domain: str, user_keywords: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         [WORKER FUNCTION]
         Analyzes a SINGLE page (URL) for a policy link, validates the LLM's choice, and calculates a keyword bonus.
@@ -71,18 +97,26 @@ class PrivacyAnalyzer:
         """
         html_lower = ""
         link_extraction_phases = []
+        phase_name = f"find_privacy_policy_hop_{hop_num}"
         try:
             logger.info(f"Analyzing page (Hop {hop_num}): {url}")
             if not page.url == url:
                 await page.goto(url, timeout=60000, wait_until="domcontentloaded")
 
-            # Step 1: Get heuristic candidates as rich objects ({href, text})
-            promising_links_objects = await self._filter_internal_links(page, url, user_keywords)
+            # Step 1: Get all internal links and dump snapshot
+            all_links_objects = await self._extract_all_internal_links(page)
+            await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
+            html_content_snapshot = await page.content() # Get HTML for the return object
+            
+            # Step 2: Filter for promising links based on keywords
+            promising_links_objects = self._filter_promising_links(all_links_objects, user_keywords)
 
             link_extraction_phases.append({
                 "main_link": url,
-                "phase": f"find_privacy_policy_hop_{hop_num}",
-                "extracted_links": [link['href'] for link in promising_links_objects]
+                "phase": phase_name,
+                "all_extracted_links": all_links_objects,
+                "promising_extracted_links": [link['href'] for link in promising_links_objects],
+                "snapshot_html_content": html_content_snapshot
             })
 
             # Check for external redirect after navigation
@@ -94,13 +128,13 @@ class PrivacyAnalyzer:
             html = await page.content()
             html_lower = html.lower()
 
-            # Step 2: Call LLM with a simple list of hrefs for the prompt
+            # Step 3: Call LLM with a simple list of hrefs for the prompt
             href_list_for_llm = [link['href'] for link in promising_links_objects]
             policy_output = await self._extract_policy_url_from_html(html, url, href_list_for_llm)
             llm_url = policy_output.get("privacy_policy_url")
             logger.debug(f"Returned choice from LLM: {llm_url}")
 
-            # Step 3: Validate the LLM's choice and apply heuristic override if needed
+            # Step 4: Validate the LLM's choice and apply heuristic override if needed
             if promising_links_objects and llm_url:
                 # Check if the LLM's choice is valid (i.e., it's one of the promising hrefs)
                 is_llm_choice_valid = any(llm_url in link_obj['href'] for link_obj in promising_links_objects)
@@ -119,7 +153,7 @@ class PrivacyAnalyzer:
                     else:
                         logger.warning("Heuristic fallback found no suitable link either.")
             
-            # Step 4: Calculate keyword bonus
+            # Step 5: Calculate keyword bonus
             keyword_bonus = 0.0
             if user_keywords and any(keyword.lower() in html_lower for keyword in user_keywords):
                 logger.info(f"User keywords found on {url}, applying bonus.")
@@ -127,7 +161,7 @@ class PrivacyAnalyzer:
             
             policy_output['keyword_bonus'] = keyword_bonus
 
-            # Step 5: Ensure the final URL is absolute
+            # Step 6: Ensure the final URL is absolute
             found_url = policy_output.get("privacy_policy_url")
             if found_url:
                 policy_output["privacy_policy_url"] = urljoin(url, found_url)
@@ -141,7 +175,7 @@ class PrivacyAnalyzer:
             if page:
                 await page.close()
 
-    async def find_privacy_policy(self, context, site_url: str, filter_keywords: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    async def find_privacy_policy(self, context, site_url: str, site_dump_folder: str, filter_keywords: Optional[List[str]] = None) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         [ORCHESTRATOR FUNCTION]
         Orchestrates the search for the privacy policy URL.
@@ -163,7 +197,7 @@ class PrivacyAnalyzer:
             initial_page = await context.new_page()
             
             initial_result, initial_links = await self._analyze_page_for_policy(
-                initial_page, site_url, 0, root_domain, filter_keywords
+                initial_page, site_url, site_dump_folder, 0, root_domain, filter_keywords
             )
             link_extraction_phases.extend(initial_links)
             
@@ -276,7 +310,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    async def find_cookie_declaration_page(self, context, privacy_policy_url: str, site_dump_folder: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the cookie declaration page using a multi-stage hybrid analysis.
         1.  Check if the declaration is on the initial privacy policy page.
@@ -291,12 +325,31 @@ class PrivacyAnalyzer:
         validation_page = None
         stage1_result = None
         link_extraction_phases = []
+        phase_name = "find_cookie_declaration_page_stage_2"
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for cookie declaration ON the page: {privacy_policy_url}")
             page = await context.new_page()
             await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
-            
+
+            # --- Snapshot and Link Extraction ---
+            all_links_objects = await self._extract_all_internal_links(page)
+            # The _dump_snapshot function is already called and works as intended.
+            # To make the output more complete, we will also include the full snapshot
+            # data in the returned JSON result.
+            await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
+            html_content_snapshot = await page.content() # Get HTML for the return object
+            cookie_keywords = search_keywords_config.get('cookie_declaration', [])
+            promising_links_objects = self._filter_promising_links(all_links_objects, cookie_keywords)
+
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": phase_name,
+                "all_extracted_links": all_links_objects, # Returning full objects
+                "promising_extracted_links": [link['href'] for link in promising_links_objects],
+                "snapshot_html_content": html_content_snapshot # Returning HTML
+            })
+
             page_content = await page.evaluate("document.body.innerText")
             if not page_content:
                 logger.warning(f"Initial page {privacy_policy_url} has no text content.")
@@ -312,15 +365,6 @@ class PrivacyAnalyzer:
             logger.info("Stage 2: Starting HYBRID search for a separate cookie policy link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
-            cookie_keywords = search_keywords_config.get('cookie_declaration', [])
-            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, cookie_keywords)
-            
-            link_extraction_phases.append({
-                "main_link": privacy_policy_url,
-                "phase": "find_cookie_declaration_page_stage_2",
-                "extracted_links": [link['href'] for link in promising_links_objects]
-            })
-
             if not promising_links_objects:
                 logger.info("No promising links found for a separate page.")
                 if stage1_result:
@@ -472,7 +516,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_data_retention_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    async def find_data_retention_page(self, context, privacy_policy_url: str, site_dump_folder: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the data retention page using a multi-stage hybrid analysis, mirroring the cookie declaration search logic.
         1.  Check if the declaration is on the initial privacy policy page.
@@ -487,11 +531,27 @@ class PrivacyAnalyzer:
         validation_page = None
         stage1_result = None
         link_extraction_phases = []
+        phase_name = "find_data_retention_page_stage_2"
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for data retention ON the page: {privacy_policy_url}")
             page = await context.new_page()
             await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
+            
+            # --- Snapshot and Link Extraction ---
+            all_links_objects = await self._extract_all_internal_links(page)
+            await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
+            html_content_snapshot = await page.content() # Get HTML for the return object
+            data_retention_keywords = search_keywords_config.get('data_retention', [])
+            promising_links_objects = self._filter_promising_links(all_links_objects, data_retention_keywords)
+
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": phase_name,
+                "all_extracted_links": all_links_objects,
+                "promising_extracted_links": [link['href'] for link in promising_links_objects],
+                "snapshot_html_content": html_content_snapshot
+            })
             
             page_content = await page.evaluate("document.body.innerText")
             if not page_content:
@@ -509,15 +569,6 @@ class PrivacyAnalyzer:
             logger.info("Stage 2: Starting HYBRID search for a separate data retention link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
-            data_retention_keywords = search_keywords_config.get('data_retention', [])
-            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_retention_keywords)
-            
-            link_extraction_phases.append({
-                "main_link": privacy_policy_url,
-                "phase": "find_data_retention_page_stage_2",
-                "extracted_links": [link['href'] for link in promising_links_objects]
-            })
-
             if not promising_links_objects:
                 logger.info("No promising links found for a separate data retention page.")
                 if stage1_result:
@@ -669,7 +720,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_data_deletion_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    async def find_data_deletion_page(self, context, privacy_policy_url: str, site_dump_folder: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the data deletion page using a multi-stage hybrid analysis.
         """
@@ -680,12 +731,26 @@ class PrivacyAnalyzer:
         validation_page = None
         stage1_result = None
         link_extraction_phases = []
+        phase_name = "find_data_deletion_page_stage_2"
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for data deletion ON the page: {privacy_policy_url}")
             page = await context.new_page()
             await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
             
+            # --- Snapshot and Link Extraction ---
+            all_links_objects = await self._extract_all_internal_links(page)
+            await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
+            data_deletion_keywords = search_keywords_config.get('data_deletion', [])
+            promising_links_objects = self._filter_promising_links(all_links_objects, data_deletion_keywords)
+            
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": phase_name,
+                "all_extracted_links": [link['href'] for link in all_links_objects],
+                "promising_extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             page_content = await page.evaluate("document.body.innerText")
             if not page_content:
                 logger.warning(f"Initial page {privacy_policy_url} has no text content.")
@@ -702,15 +767,6 @@ class PrivacyAnalyzer:
             logger.info("Stage 2: Starting HYBRID search for a separate data deletion link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
-            data_deletion_keywords = search_keywords_config.get('data_deletion', [])
-            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, data_deletion_keywords)
-            
-            link_extraction_phases.append({
-                "main_link": privacy_policy_url,
-                "phase": "find_data_deletion_page_stage_2",
-                "extracted_links": [link['href'] for link in promising_links_objects]
-            })
-
             if not promising_links_objects:
                 logger.info("No promising links found for a separate data deletion page.")
                 if stage1_result:
@@ -865,7 +921,7 @@ class PrivacyAnalyzer:
         
         return response.data
 
-    async def find_dpo_page(self, context, privacy_policy_url: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    async def find_dpo_page(self, context, privacy_policy_url: str, site_dump_folder: str, search_keywords_config: Dict[str, List[str]]) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
         """
         Finds the DPO contact page using a multi-stage hybrid analysis.
         """
@@ -876,12 +932,26 @@ class PrivacyAnalyzer:
         validation_page = None
         stage1_result = None
         link_extraction_phases = []
+        phase_name = "find_dpo_page_stage_2"
         try:
             # --- Stage 1: Analyze the initial privacy policy page for content ---
             logger.info(f"Stage 1: Analyzing for DPO information ON the page: {privacy_policy_url}")
             page = await context.new_page()
             await page.goto(privacy_policy_url, timeout=60000, wait_until="domcontentloaded")
+
+            # --- Snapshot and Link Extraction ---
+            all_links_objects = await self._extract_all_internal_links(page)
+            await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
+            dpo_keywords = search_keywords_config.get('dpo', [])
+            promising_links_objects = self._filter_promising_links(all_links_objects, dpo_keywords)
             
+            link_extraction_phases.append({
+                "main_link": privacy_policy_url,
+                "phase": phase_name,
+                "all_extracted_links": [link['href'] for link in all_links_objects],
+                "promising_extracted_links": [link['href'] for link in promising_links_objects]
+            })
+
             page_content = await page.evaluate("document.body.innerText")
             if not page_content:
                 logger.warning(f"Initial page {privacy_policy_url} has no text content.")
@@ -898,15 +968,6 @@ class PrivacyAnalyzer:
             logger.info("Stage 2: Starting HYBRID search for a separate DPO contact link.")
 
             # --- Stage 2: Hybrid model to find the best candidate link ---
-            dpo_keywords = search_keywords_config.get('dpo', [])
-            promising_links_objects = await self._filter_internal_links(page, privacy_policy_url, dpo_keywords)
-            
-            link_extraction_phases.append({
-                "main_link": privacy_policy_url,
-                "phase": "find_dpo_page_stage_2",
-                "extracted_links": [link['href'] for link in promising_links_objects]
-            })
-
             if not promising_links_objects:
                 logger.info("No promising links found for a separate DPO page.")
                 if stage1_result:
@@ -1048,32 +1109,42 @@ class PrivacyAnalyzer:
     ############################################################################### UTILITY FUNCTIONS ###############################################################################
 
     # --- Generic Utility Methods ---
-    async def _filter_internal_links(self, page, site_url: str, filter_keywords: Optional[List[str]] = None) -> List[Dict[str, str]]:
+    def _filter_promising_links(self, all_links: List[Dict[str, str]], filter_keywords: List[str]) -> List[Dict[str, str]]:
+        """
+        Filters a list of link objects based on a list of keywords.
+        """
+        if not filter_keywords:
+            return []
+
+        promising_links = []
+        lower_keywords = [k.lower() for k in filter_keywords]
+
+        for link in all_links:
+            search_area = link["href"].lower() + " " + link["text"].lower()
+            if any(keyword in search_area for keyword in lower_keywords):
+                promising_links.append(link)
+        
+        return promising_links
+
+    async def _extract_all_internal_links(self, page) -> List[Dict[str, str]]:
         """
         Helper to extract all internal links (including subdomains) from a page,
         returning both the URL and the anchor text.
         """
-        logger.debug(f"filtering keywords: {filter_keywords}")
         links = []
         unique_hrefs = set()
-
-        if filter_keywords is None:
-            filter_keywords = []
-        lower_keywords = [k.lower() for k in filter_keywords]
+        site_url = page.url
 
         base_netloc = urlparse(site_url).netloc
         root_domain = base_netloc[4:] if base_netloc.startswith("www.") else base_netloc 
-        
-        base_url_for_join = page.url # Use the actual current URL of the page
         
         for a in await page.query_selector_all('a'):
             href = None
             try:
                 href = await a.get_attribute('href')
                 if href:
-                    full_url = urljoin(base_url_for_join, href)
+                    full_url = urljoin(site_url, href)
                     
-                    # Avoid duplicates
                     if full_url in unique_hrefs:
                         continue
 
@@ -1084,16 +1155,12 @@ class PrivacyAnalyzer:
                     
                     if (is_exact_domain or is_subdomain) and '#' not in full_url and not full_url.endswith(('.js', '.css', '.png', '.jpg', '.jpeg', '.gif', '.pdf', '.xml', '.json', '.zip', '.rar', '.tar', '.gz', '.svg', '.ico')):
                         text_content = (await a.inner_text() or "").strip()
-                        search_area = href.lower() + " " + text_content.lower()
-                        
-                        if not lower_keywords or any(keyword in search_area for keyword in lower_keywords):
-                            logger.debug(f"Adding link {full_url} with text='{text_content}'")
-                            links.append({"href": full_url, "text": text_content})
-                            unique_hrefs.add(full_url)
+                        links.append({"href": full_url, "text": text_content})
+                        unique_hrefs.add(full_url)
             except Exception as e:
                 logger.debug(f"Could not process link {href}: {e}")
 
-        logger.debug(f"Internal links found on page {full_url}: {links}")
+        logger.debug(f"Found {len(links)} total internal links on {page.url}")
         return links
     
     def _get_best_candidate(self, promising_links: List[Dict[str, str]], keyword_priority_list: List[str]) -> Optional[str]:

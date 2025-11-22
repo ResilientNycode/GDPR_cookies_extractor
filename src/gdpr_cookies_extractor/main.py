@@ -31,45 +31,7 @@ def sanitize_filename(url: str) -> str:
     return sanitized
 
 
-async def dump_data(current_url: str, scenario: str, cookies: list, context, full_privacy_policy_url: Optional[str], initial_page_url: str, timestamp: str):
-    """Dumps cookies to a JSON file, the privacy policy to an HTML file, and the initial page HTML."""
-    sanitized_url = sanitize_filename(current_url)
-    dump_dir = f"output/dumps/analysis_results_{timestamp}"
-    os.makedirs(dump_dir, exist_ok=True)
-    
-    # Dump cookies
-    cookie_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_cookies.json"
-    with open(cookie_dump_path, "w") as f:
-        json.dump(cookies, f, indent=4)
-    logger.info(f"Dumped {len(cookies)} cookies to {cookie_dump_path}")
-
-    # Dump initial page HTML
-    try:
-        async with await context.new_page() as initial_page_dump:
-            await initial_page_dump.goto(initial_page_url, wait_until="domcontentloaded", timeout=60000)
-            initial_html = await initial_page_dump.content()
-            initial_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_initial_page.html"
-            with open(initial_dump_path, "w", encoding="utf-8") as f:
-                f.write(initial_html)
-            logger.info(f"Dumped initial page HTML to {initial_dump_path}")
-    except Exception as e:
-        logger.error(f"Failed to dump initial page HTML for {initial_page_url}: {e}")
-
-    # Dump privacy policy
-    if full_privacy_policy_url:
-        try:
-            async with await context.new_page() as policy_page:
-                await policy_page.goto(full_privacy_policy_url, wait_until="domcontentloaded", timeout=60000)
-                policy_html = await policy_page.content()
-                policy_dump_path = f"{dump_dir}/{sanitized_url}_{scenario}_privacy_policy.html"
-                with open(policy_dump_path, "w", encoding="utf-8") as f:
-                    f.write(policy_html)
-                logger.info(f"Dumped privacy policy to {policy_dump_path}")
-        except Exception as e:
-            logger.error(f"Failed to dump privacy policy for {full_privacy_policy_url}: {e}")
-
-
-async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, timestamp: str, search_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
+async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: str, scenario: str, site_dump_folder: str, search_keywords_config: Dict[str, List[str]]) -> SiteAnalysisResult:
     """
     Runs the full analysis for a single site and a single cookie scenario.
     Returns a SiteAnalysisResult object.
@@ -100,7 +62,7 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
 
             # Find Privacy Policy Page
             llm_output, privacy_policy_links = await analyzer.find_privacy_policy(
-                context, current_url, 
+                context, current_url, site_dump_folder,
                 filter_keywords=search_keywords_config.get('privacy_policy', []),
             )
 
@@ -115,21 +77,25 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
                 cookie_declaration_task = analyzer.find_cookie_declaration_page(
                     context, 
                     full_privacy_policy_url,
+                    site_dump_folder,
                     search_keywords_config=search_keywords_config
                 )
                 data_retention_task = analyzer.find_data_retention_page(
                     context,
                     full_privacy_policy_url,
+                    site_dump_folder,
                     search_keywords_config=search_keywords_config
                 )
                 data_deletion_task = analyzer.find_data_deletion_page(
                     context,
                     full_privacy_policy_url,
+                    site_dump_folder,
                     search_keywords_config=search_keywords_config
                 )
                 dpo_task = analyzer.find_dpo_page(
                     context,
                     full_privacy_policy_url,
+                    site_dump_folder,
                     search_keywords_config=search_keywords_config
                 )
 
@@ -152,8 +118,6 @@ async def process_site_scenario(context, analyzer: PrivacyAnalyzer, site_url: st
                     "data_deletion": data_deletion_res,
                     "dpo": dpo_res
                 }
-
-            await dump_data(current_url, scenario, cookies, context, full_privacy_policy_url, site_url, timestamp)
             
             # Format Success Result ---
             return SiteAnalysisResult.from_outputs(
@@ -182,12 +146,16 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
     """
     tasks = []
     scenarios = ["accept"]
+    base_dump_dir = f"output/dumps/analysis_results_{timestamp}"
+
 
     for index, row in sites_df.iterrows():
         site_url = row['website_url']
         parsed_url = urlparse(site_url)
         if not parsed_url.scheme:
             site_url = "https://" + site_url
+
+        site_dump_folder = os.path.join(base_dump_dir, sanitize_filename(site_url))
             
         for scenario in scenarios:
             # Create a new context for each task to ensure isolation
@@ -199,7 +167,7 @@ async def run_all_analyses(sites_df: pd.DataFrame, analyzer: PrivacyAnalyzer, br
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/100.0.4896.75 Safari/537.36"
             )
             tasks.append(
-                process_site_scenario(context, analyzer, site_url, scenario, timestamp, search_keywords_config)
+                process_site_scenario(context, analyzer, site_url, scenario, site_dump_folder, search_keywords_config)
             )
     
     results = await asyncio.gather(*tasks)
@@ -278,6 +246,7 @@ async def gdpr_analysis(sites_df):
     llm_provider = OllamaProvider(model=llm_config.get('model', 'llama3'))
     analyzer = PrivacyAnalyzer(
         llm_client=llm_provider,
+        timestamp=timestamp,
         max_hops=scraper_config.get('max_hops', 3)
     )
     
