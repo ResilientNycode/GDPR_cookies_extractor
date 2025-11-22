@@ -106,7 +106,6 @@ class PrivacyAnalyzer:
             # Step 1: Get all internal links and dump snapshot
             all_links_objects = await self._extract_all_internal_links(page)
             await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
-            html_content_snapshot = await page.content() # Get HTML for the return object
             
             # Step 2: Filter for promising links based on keywords
             promising_links_objects = self._filter_promising_links(all_links_objects, user_keywords)
@@ -115,8 +114,7 @@ class PrivacyAnalyzer:
                 "main_link": url,
                 "phase": phase_name,
                 "all_extracted_links": all_links_objects,
-                "promising_extracted_links": [link['href'] for link in promising_links_objects],
-                "snapshot_html_content": html_content_snapshot
+                "promising_extracted_links": [link['href'] for link in promising_links_objects]
             })
 
             # Check for external redirect after navigation
@@ -334,20 +332,15 @@ class PrivacyAnalyzer:
 
             # --- Snapshot and Link Extraction ---
             all_links_objects = await self._extract_all_internal_links(page)
-            # The _dump_snapshot function is already called and works as intended.
-            # To make the output more complete, we will also include the full snapshot
-            # data in the returned JSON result.
             await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
-            html_content_snapshot = await page.content() # Get HTML for the return object
             cookie_keywords = search_keywords_config.get('cookie_declaration', [])
             promising_links_objects = self._filter_promising_links(all_links_objects, cookie_keywords)
 
             link_extraction_phases.append({
                 "main_link": privacy_policy_url,
                 "phase": phase_name,
-                "all_extracted_links": all_links_objects, # Returning full objects
-                "promising_extracted_links": [link['href'] for link in promising_links_objects],
-                "snapshot_html_content": html_content_snapshot # Returning HTML
+                "all_extracted_links": all_links_objects,
+                "promising_extracted_links": [link['href'] for link in promising_links_objects]
             })
 
             page_content = await page.evaluate("document.body.innerText")
@@ -541,7 +534,6 @@ class PrivacyAnalyzer:
             # --- Snapshot and Link Extraction ---
             all_links_objects = await self._extract_all_internal_links(page)
             await self._dump_snapshot(page, site_dump_folder, phase_name, all_links_objects)
-            html_content_snapshot = await page.content() # Get HTML for the return object
             data_retention_keywords = search_keywords_config.get('data_retention', [])
             promising_links_objects = self._filter_promising_links(all_links_objects, data_retention_keywords)
 
@@ -549,8 +541,7 @@ class PrivacyAnalyzer:
                 "main_link": privacy_policy_url,
                 "phase": phase_name,
                 "all_extracted_links": all_links_objects,
-                "promising_extracted_links": [link['href'] for link in promising_links_objects],
-                "snapshot_html_content": html_content_snapshot
+                "promising_extracted_links": [link['href'] for link in promising_links_objects]
             })
             
             page_content = await page.evaluate("document.body.innerText")
